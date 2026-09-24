@@ -2,6 +2,7 @@ import {
   captureStagedActivityBefore,
   captureStagedActivityAfter,
 } from "./activity-capture";
+import { encryptJson } from "../../platform/crypto";
 import {
   createDrizzle,
   sanitizeDatabaseError,
@@ -339,6 +340,43 @@ export function emptySyncNewRecordCounts(): SyncNewRecordCounts {
   return { invoices: 0, bankTransactions: 0, investmentTransactions: 0 };
 }
 
+export async function encryptSyncRecordsRawPayload(
+  records: SyncWriteRecord[],
+  secret: string,
+): Promise<SyncWriteRecord[]> {
+  if (!secret || records.length === 0) {
+    return records;
+  }
+
+  const result: SyncWriteRecord[] = [];
+  for (const record of records) {
+    const rawPayload = record.payload?.raw_payload;
+    if (
+      typeof rawPayload === "string" &&
+      rawPayload.length > 0 &&
+      !rawPayload.startsWith('{"v":1,"alg":"AES-GCM"')
+    ) {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(rawPayload);
+      } catch {
+        parsed = rawPayload;
+      }
+      const encrypted = await encryptJson(parsed, secret);
+      result.push({
+        ...record,
+        payload: {
+          ...record.payload,
+          raw_payload: encrypted,
+        },
+      });
+    } else {
+      result.push(record);
+    }
+  }
+  return result;
+}
+
 /**
  * Append normalized records to a durable staging run without promoting them.
  *
@@ -350,12 +388,20 @@ export async function stageSyncWriteRecords(
   db: D1Database,
   runId: string,
   records: SyncWriteRecord[],
+  secret?: string,
 ) {
   if (records.length === 0) return;
+  const recordsToStage = secret
+    ? await encryptSyncRecordsRawPayload(records, secret)
+    : records;
   const createdAt = new Date().toISOString();
   // 保留 JSON set-based upsert：每 chunk 只綁定三個參數，避免逐筆 values 擴大參數量。
-  for (let offset = 0; offset < records.length; offset += STAGING_CHUNK_SIZE) {
-    const chunk = records.slice(offset, offset + STAGING_CHUNK_SIZE);
+  for (
+    let offset = 0;
+    offset < recordsToStage.length;
+    offset += STAGING_CHUNK_SIZE
+  ) {
+    const chunk = recordsToStage.slice(offset, offset + STAGING_CHUNK_SIZE);
     await db
       .prepare(
         `INSERT INTO sync_write_staging (run_id, entity_type, record_key, payload, created_at)
@@ -437,6 +483,7 @@ export async function persistStagedSyncWrite(
   db: D1Database,
   input: {
     records: SyncWriteRecord[];
+    secret?: string;
     beforePromoteStatements?: D1PreparedStatement[];
     afterPromoteStatements?: D1PreparedStatement[];
     finalizeStatements?: D1PreparedStatement[];
@@ -457,7 +504,7 @@ export async function persistStagedSyncWrite(
     });
 
   try {
-    await stageSyncWriteRecords(db, runId, input.records);
+    await stageSyncWriteRecords(db, runId, input.records, input.secret);
     return await promoteStagedSyncWrite(db, {
       runId,
       entityTypes: input.records.map((record) => record.entityType),
