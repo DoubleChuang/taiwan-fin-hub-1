@@ -8,6 +8,7 @@ on:
 
 permissions:
   contents: write
+  pull-requests: write
 
 concurrency:
   group: sync-upstream
@@ -27,6 +28,10 @@ jobs:
           fetch-depth: 0
 
       - name: Sync upstream main safely
+        id: sync
+        env:
+          SYNC_CREATE_PR: "true"
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
         run: |
           set -euo pipefail
@@ -44,3 +49,12 @@ jobs:
           fi
 
           node "$updater"
+
+      - name: Review PR security with OpenCode
+        if: steps.sync.outputs.pr_number != ''
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          node scripts/review-pr-security.mjs --pr "${{ steps.sync.outputs.pr_number }}"
