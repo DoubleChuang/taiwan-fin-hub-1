@@ -18,7 +18,7 @@ Workers、D1、Queues、Workers AI 與 Browser Run 均有免費額度，但並�
 openssl rand -hex 32
 ```
 
-`CONFIG_ENCRYPTION_KEY` 用來加密 D1 中的連接器設定，一般私人部署仍然需要。使用一鍵部署時只需填入一次，Cloudflare 會保存並在後續部署中沿用；沒有另外記下不會影響現有 Worker。若日後要重建 Worker、搬移環境或沿用既有 D1，則必須使用相同金鑰，否則需要重新設定所有連接器。建議需要災難復原能力的使用者將它保存在密碼管理器，並且不要在既有部署中任意更換或刪除。
+`CONFIG_ENCRYPTION_KEY` 用來加密 D1 中的連接器設定與各項金融記錄的原始資料（`raw_payload`），一般私人部署仍然需要。使用一鍵部署時只需填入一次，Cloudflare 會保存並在後續部署中沿用；沒有另外記下不會影響現有 Worker。若日後要重建 Worker、搬移環境或沿用既有 D1，則必須使用相同金鑰，否則需要重新設定所有連接器且無法解密既有加密資料。建議需要災難復原能力的使用者將它保存在密碼管理器，並且不要在既有部署中任意更換或刪除。
 
 ### 2. 執行 Deploy to Cloudflare
 
@@ -79,7 +79,7 @@ Deploy to Cloudflare 建立的新 repository 不會包含本專案的 `.github/w
 1. 在部署 repository 開啟 [`deploy/github/sync-upstream.yml`](../deploy/github/sync-upstream.yml)，點擊 **Raw** 並複製內容。
 2. 回到 repository 首頁，選擇 **Add file → Create new file**。
 3. 建立 `.github/workflows/sync-upstream.yml`，貼上內容並 commit 至 `main`。
-4. 前往 **Settings → Actions → General → Workflow permissions**，允許 GitHub Actions 寫入 repository。
+4. 前往 **Settings → Actions → General → Workflow permissions**，選擇 **Read and write permissions**，並勾選 **Allow GitHub Actions to create and approve pull requests**。
 
 ### 從本機安裝
 
@@ -100,7 +100,9 @@ workflow 會：
 1. 取得 `TedLin1993/all-set-tw` 的最新 `main`。
 2. 以前次同步版本為基準進行三方合併。
 3. 保留部署 repository 自己的 `.github/workflows`。
-4. 有新版本時推送至 `main`，由 Workers Builds 重新部署。
+4. 有新版本時，不再直接推送到 `main` 以避免直接部署未經審查的程式碼，而是推送到專屬同步分支並建立 GitHub Pull Request（標題如 `chore(upstream): 同步上游版本 <commit>`）。
+5. GitHub Actions 會自動執行 OpenCode 安全性審查（`scripts/review-pr-security.mjs`），稽核 PR diff（檢查未授權外部網路連線、加解密與金鑰完整性、workflow 權限與敏感憑證洩漏等），並自動在 PR 發表安全性評估報告留言。
+6. 使用者檢視審查報告並確認無誤後合併 PR 至 `main`，由 Workers Builds 重新部署。
 
 首次同步若沒有共同 Git history，更新器只會在部署內容可對應到上游版本、且 workflows 以外沒有自行修改時接軌。同步前會建立 `backup-before-first-upstream-sync` branch；同名 branch 已存在時不會覆寫。
 
@@ -109,7 +111,7 @@ workflow 會：
 ### 更新故障排查
 
 - **Workflow 沒有執行**：確認檔案位於 `.github/workflows/sync-upstream.yml`，並檢查 Actions 是否啟用。
-- **無法推送更新**：確認 Workflow permissions 允許寫入 repository。
+- **無法推送更新或建立 PR**：確認 **Settings → Actions → General → Workflow permissions** 已選擇 **Read and write permissions** 並勾選 **Allow GitHub Actions to create and approve pull requests**。
 - **合併衝突**：從該次 Actions log 查看衝突檔案，手動合併後再重新執行。
 - **`fatal: refusing to merge unrelated histories`**：部署 repository 仍在使用舊版 workflow，請重新複製最新的 [`deploy/github/sync-upstream.yml`](../deploy/github/sync-upstream.yml)。
 - **Queue 權限錯誤**：替 Workers Builds API token 增加帳戶層級的 Queues Read 與 Queues Edit。
@@ -158,4 +160,4 @@ XDG_CONFIG_HOME=.wrangler-config node scripts/deploy-with-vapid.mjs \
 
 執行前請再次確認 `database_id`、Worker 名稱與所有 bindings 都指向預期環境。資料庫 migration 會修改遠端 schema，不要使用未確認的正式資料庫進行測試。
 
-若既有 D1 已儲存連接器設定，部署時也必須提供原本相同的 `CONFIG_ENCRYPTION_KEY`；新的隨機金鑰無法解密既有資料。
+若既有 D1 已儲存連接器設定與加密資料，部署時也必須提供原本相同的 `CONFIG_ENCRYPTION_KEY`；新的隨機金鑰無法解密既有資料。
