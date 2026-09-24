@@ -557,7 +557,7 @@ if (args[0] === "--version") {
   process.exit(0);
 }
 if (args[0] === "pr" && args[1] === "list") {
-  console.log("");
+  console.log("[]");
   process.exit(0);
 }
 if (args[0] === "pr" && args[1] === "create") {
@@ -587,7 +587,10 @@ process.exit(0);
     );
     assert.equal(remoteBranch(deployment.worktree, syncBranch), newHead);
 
-    assert.equal(readFileSync(outputFile, "utf8"), "pr_number=123\n");
+    assert.equal(
+      readFileSync(outputFile, "utf8"),
+      "pr_number=123\npr_url=https://github.com/example/repo/pull/123\n",
+    );
 
     const calls = readFileSync(callsLog, "utf8")
       .trim()
@@ -597,6 +600,8 @@ process.exit(0);
     assert.ok(prListCall);
     assert.ok(prListCall.includes("--head"));
     assert.ok(prListCall.includes(syncBranch));
+    assert.ok(prListCall.includes("--json"));
+    assert.ok(prListCall.includes("number,url"));
 
     const prCreateCall = calls.find((c) => c[0] === "pr" && c[1] === "create");
     assert.ok(prCreateCall);
@@ -643,7 +648,14 @@ if (args[0] === "--version") {
   process.exit(0);
 }
 if (args[0] === "pr" && args[1] === "list") {
-  console.log("888");
+  console.log(
+    JSON.stringify([
+      {
+        number: 888,
+        url: "https://github.com/example/repo/pull/888",
+      },
+    ]),
+  );
   process.exit(0);
 }
 if (args[0] === "pr" && args[1] === "create") {
@@ -673,7 +685,10 @@ process.exit(0);
     );
     assert.equal(remoteBranch(deployment.worktree, syncBranch), newHead);
 
-    assert.equal(readFileSync(outputFile, "utf8"), "pr_number=888\n");
+    assert.equal(
+      readFileSync(outputFile, "utf8"),
+      "pr_number=888\npr_url=https://github.com/example/repo/pull/888\n",
+    );
 
     const calls = readFileSync(callsLog, "utf8")
       .trim()
@@ -681,6 +696,10 @@ process.exit(0);
       .map((line) => JSON.parse(line));
     const prListCall = calls.find((c) => c[0] === "pr" && c[1] === "list");
     assert.ok(prListCall);
+    assert.ok(prListCall.includes("--head"));
+    assert.ok(prListCall.includes(syncBranch));
+    assert.ok(prListCall.includes("--json"));
+    assert.ok(prListCall.includes("number,url"));
 
     const prCreateCall = calls.find((c) => c[0] === "pr" && c[1] === "create");
     assert.equal(prCreateCall, undefined);
