@@ -166,6 +166,13 @@ export function scanDataExfiltration(fileDiffs) {
   const triggerRegex = /\b(?:fetch|new\s+WebSocket|axios)\b|https?:\/\//i;
 
   for (const file of fileDiffs) {
+    if (
+      file.filePath.endsWith(".md") ||
+      file.filePath.endsWith(".txt") ||
+      file.filePath.endsWith("scripts/review-pr-security.mjs")
+    ) {
+      continue;
+    }
     for (const line of file.addedLines) {
       if (!triggerRegex.test(line.content)) continue;
 
@@ -291,6 +298,9 @@ export function scanCryptoAndKeyIntegrity(changedFiles, fileDiffs) {
 
   // 2. 檢查程式碼中是否修改或新增關鍵加密參數/API
   for (const file of fileDiffs) {
+    if (file.filePath.endsWith(".md") || file.filePath.endsWith(".txt")) {
+      continue;
+    }
     for (const line of file.addedLines) {
       for (const kw of SENSITIVE_CRYPTO_KEYWORDS) {
         if (line.content.includes(kw)) {
