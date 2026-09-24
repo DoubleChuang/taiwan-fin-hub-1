@@ -131,6 +131,7 @@ interface DepositQueryBody {
 }
 
 interface CardOverviewBody {
+  creditCardFeePaid?: boolean;
   currentStatement?: Array<{
     currency?: string;
     totalAmountDue?: number | string;
@@ -149,7 +150,6 @@ interface BillSummaryBody {
   billInfo?: {
     billDate?: string;
     paymentDueDate?: string;
-    isBillPaidShow?: boolean | string;
     billTotalInfoList?: Array<{
       billTotalCurrency?: string;
       billTotalAmount?: number | string;
@@ -329,7 +329,7 @@ export function readEsunCardBalances(snapshot: EsunSnapshot) {
     ),
     outstanding: (statementBalance ?? 0) + unposted,
     currency: statement?.currency || billTotal?.billTotalCurrency || "TWD",
-    isPaid: bill?.isBillPaidShow === true || bill?.isBillPaidShow === "Y",
+    isPaid: overview?.creditCardFeePaid === true ? true : undefined,
     billingPeriod:
       parseBillPeriod(snapshot.billPeriod) ??
       parseFlexibleDate(bill?.billDate)?.slice(0, 7),
@@ -748,12 +748,15 @@ function toTimelineTransaction(
 }
 
 function signedCardAmount(detail: IescDetail) {
-  const raw = Math.abs(
+  const value =
     numberOrUndefined(
       detail.paymentAmount ?? detail.transAmount ?? detail.amount,
-    ) ?? 0,
-  );
-  return detail.positiveTrans === false ? -raw : raw;
+    ) ?? 0;
+  // 近一年消費與帳單明細 API 以負數表示退款且不帶 positiveTrans，
+  // 取絕對值會把退款誤判成消費，因此保留原始負號。
+  return detail.positiveTrans === false || value < 0
+    ? -Math.abs(value)
+    : Math.abs(value);
 }
 
 function lifecycleFromStatus(detail: IescDetail) {

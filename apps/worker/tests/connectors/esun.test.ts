@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { buildEsunCreditTimelinePages } from "../../src/connectors/esun-portal";
+import {
+  buildEsunCreditTimelinePages,
+  readEsunCardBalances,
+  type EsunSnapshot,
+} from "../../src/connectors/esun-portal";
 import {
   appendEsunDepositTransactions,
   esunCreditBalanceAccountId,
@@ -35,6 +39,28 @@ function transaction(
     ...overrides,
   };
 }
+
+describe("E.SUN bill payment status", () => {
+  it.each([
+    [true, true],
+    [false, undefined],
+  ])("maps creditCardFeePaid %s to %s", (overviewPaid, isPaid) => {
+    const snapshot: EsunSnapshot = {
+      cardOverview: {
+        resultCode: "0000",
+        resultBody: { creditCardFeePaid: overviewPaid },
+      },
+      billSummary: { body: { billInfo: {} } },
+      billPeriod: "202608",
+      realtime: {},
+      creditHistory: [],
+      twDeposits: [],
+      frDeposits: [],
+    };
+
+    expect(readEsunCardBalances(snapshot).isPaid).toBe(isPaid);
+  });
+});
 
 describe("E.SUN credit card timeline normalization", () => {
   it("uses the physical card for a single card and keeps an aggregate for multiple cards", () => {
@@ -139,6 +165,48 @@ describe("E.SUN credit card timeline normalization", () => {
         authorizedAt: "2026-07-05",
         postedDate: "2026-07-07T00:00:00.000Z",
       }),
+    ]);
+  });
+
+  it("keeps negative history amounts as refunds instead of purchases", () => {
+    const rows = normalizeEsunTimelineTransactions(
+      buildEsunCreditTimelinePages({
+        realtime: { body: { transList: [] } },
+        creditHistory: [
+          {
+            body: {
+              transList: [
+                {
+                  year: "2026",
+                  month: "09",
+                  transDetailList: [
+                    {
+                      merchantName: "優食台灣股份有限公司",
+                      cardNo: "4751-XXXX-XXXX-0412",
+                      transMonthDay: "0906",
+                      paymentAmount: 199,
+                      paymentCurrency: "TWD",
+                      statusName: "已入帳",
+                    },
+                    {
+                      merchantName: "優食台灣股份有限公司",
+                      cardNo: "4751-XXXX-XXXX-0412",
+                      transMonthDay: "0906",
+                      paymentAmount: -199,
+                      paymentCurrency: "TWD",
+                      statusName: "已入帳",
+                    },
+                  ],
+                },
+              ],
+            },
+          },
+        ],
+      }),
+    );
+
+    expect(rows.map((row) => row.amount).sort((a, b) => a - b)).toEqual([
+      -199, 199,
     ]);
   });
 
