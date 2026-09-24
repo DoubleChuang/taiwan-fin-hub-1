@@ -60,3 +60,37 @@ export async function decryptJson<TValue>(encrypted: string, secret: string) {
 
   return JSON.parse(decoder.decode(plaintext)) as TValue;
 }
+
+export async function encryptPayload(
+  value: unknown,
+  secret?: string | null,
+): Promise<string> {
+  if (value === null || value === undefined) {
+    return "";
+  }
+  if (secret) {
+    return encryptJson(value, secret);
+  }
+  return JSON.stringify(value) ?? "";
+}
+
+export async function decryptPayload<T = unknown>(
+  payload: string | null | undefined,
+  secret?: string | null,
+): Promise<T | null> {
+  if (!payload || typeof payload !== "string") {
+    return null;
+  }
+
+  try {
+    if (payload.startsWith('{"v":1,"alg":"AES-GCM"')) {
+      if (!secret) {
+        return null;
+      }
+      return await decryptJson<T>(payload, secret);
+    }
+    return JSON.parse(payload) as T;
+  } catch {
+    return null;
+  }
+}
