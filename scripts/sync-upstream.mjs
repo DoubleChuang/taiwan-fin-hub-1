@@ -480,19 +480,27 @@ function syncUpstream() {
 
     if (isGhAvailable()) {
       let prNumber = "";
+      let prUrl = "";
       const listResult = runGh([
         "pr",
         "list",
         "--head",
         syncBranch,
         "--json",
-        "number",
-        "--jq",
-        ".[0].number",
+        "number,url",
       ]);
-      const existingPr = listResult.stdout.trim();
-      if (existingPr && existingPr !== "null" && existingPr !== "undefined") {
-        prNumber = existingPr;
+      try {
+        const raw = listResult.stdout.trim();
+        const prs = raw ? JSON.parse(raw) : [];
+        if (Array.isArray(prs) && prs.length > 0 && prs[0]?.number) {
+          prNumber = String(prs[0].number);
+          prUrl = prs[0].url || "";
+        }
+      } catch {
+        // Fallback in case stdout isn't valid JSON
+      }
+
+      if (prNumber) {
         console.log(`已存在 PR #${prNumber}。`);
       } else {
         const title = `chore(upstream): 同步上游版本 ${upstreamCommit.slice(0, 10)}`;
@@ -509,17 +517,25 @@ function syncUpstream() {
           "--body",
           body,
         ]);
-        const match =
-          createResult.stdout.match(/\/pull\/(\d+)/) ||
-          createResult.stdout.match(/(\d+)/);
+        const stdout = createResult.stdout.trim();
+        const urlMatch = stdout.match(/https?:\/\/[^\s]+/);
+        if (urlMatch) {
+          prUrl = urlMatch[0];
+        }
+        const match = stdout.match(/\/pull\/(\d+)/) || stdout.match(/(\d+)/);
         if (match) {
           prNumber = match[1];
         }
         console.log(`已建立同步 PR${prNumber ? ` #${prNumber}` : ""}。`);
       }
 
-      if (prNumber && process.env.GITHUB_OUTPUT) {
-        appendFileSync(process.env.GITHUB_OUTPUT, `pr_number=${prNumber}\n`);
+      if (process.env.GITHUB_OUTPUT) {
+        if (prNumber) {
+          appendFileSync(process.env.GITHUB_OUTPUT, `pr_number=${prNumber}\n`);
+        }
+        if (prUrl) {
+          appendFileSync(process.env.GITHUB_OUTPUT, `pr_url=${prUrl}\n`);
+        }
       }
     }
 
