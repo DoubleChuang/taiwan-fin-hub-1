@@ -682,6 +682,44 @@ export function isAiAvailable() {
 }
 
 /**
+ * 格式化 AI 回應，自動處理推理模型（如 DeepSeek-R1 / deepseek-reasoner）與普通聊天模型（deepseek-chat）的差異：
+ * 1. 支援提取 message.reasoning_content 並以可折疊的 <details> 標籤呈現。
+ * 2. 支援解析文字中的 <think>...</think> 思考標籤並轉為折疊區塊。
+ * 3. 確保最終審查結論與思考過程清晰分離，避免 PR 留言被大段思考過程淹沒。
+ */
+export function formatAiResponse(input) {
+  if (!input) return null;
+
+  if (typeof input === "object" && input !== null) {
+    const content = String(input.content || "").trim();
+    const reasoning = String(input.reasoning_content || "").trim();
+
+    if (reasoning && content) {
+      return `<details>\n<summary>💭 展開 DeepSeek 推理思考過程 (Reasoning Process)</summary>\n\n${reasoning}\n\n</details>\n\n${content}`;
+    }
+    if (content) return content;
+    if (reasoning) return reasoning;
+    return null;
+  }
+
+  const text = String(input).trim();
+  if (!text) return null;
+
+  // 處理 CLI 或第三方代理輸出的 <think>...</think> 標籤
+  const thinkMatch = text.match(/<think>([\s\S]*?)<\/think>/i);
+  if (thinkMatch) {
+    const reasoning = thinkMatch[1].trim();
+    const cleanContent = text.replace(/<think>[\s\S]*?<\/think>/i, "").trim();
+    if (reasoning && cleanContent) {
+      return `<details>\n<summary>💭 展開 DeepSeek 推理思考過程 (Reasoning Process)</summary>\n\n${reasoning}\n\n</details>\n\n${cleanContent}`;
+    }
+    if (cleanContent) return cleanContent;
+  }
+
+  return text;
+}
+
+/**
  * 執行 AI 安全審查分析
  */
 export async function runAiReview(diffText, options = {}) {
@@ -746,8 +784,8 @@ export async function runAiReview(diffText, options = {}) {
 
       if (response.ok) {
         const data = await response.json();
-        const content = data.choices?.[0]?.message?.content?.trim();
-        if (content) return content;
+        const formatted = formatAiResponse(data.choices?.[0]?.message);
+        if (formatted) return formatted;
       }
     } catch {
       // 遇異常降級嘗試其他方式
@@ -801,8 +839,8 @@ export async function runAiReview(diffText, options = {}) {
 
       if (response.ok) {
         const data = await response.json();
-        const content = data.choices?.[0]?.message?.content?.trim();
-        if (content) return content;
+        const formatted = formatAiResponse(data.choices?.[0]?.message);
+        if (formatted) return formatted;
       }
     } catch {
       // 遇到異常時降級嘗試其他方式
@@ -828,16 +866,17 @@ export async function runAiReview(diffText, options = {}) {
 
       if (response.ok) {
         const data = await response.json();
-        const content =
-          data.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
-        if (content) return content;
+        const formatted = formatAiResponse(
+          data.candidates?.[0]?.content?.parts?.[0]?.text,
+        );
+        if (formatted) return formatted;
       }
     } catch {
       // 遇到異常時降級
     }
   }
 
-  // 3. 嘗試呼叫本地 opencode CLI
+  // 4. 嘗試呼叫本地 opencode CLI
   const bin = process.env.OPENCODE_BIN || "opencode";
   const isNodeScript = bin.endsWith(".js") || bin.endsWith(".mjs");
   const cmd = isNodeScript ? process.execPath : bin;
@@ -861,7 +900,7 @@ export async function runAiReview(diffText, options = {}) {
       return null;
     }
 
-    return result.stdout?.trim() || null;
+    return formatAiResponse(result.stdout?.trim()) || null;
   } catch {
     return null;
   }
