@@ -658,7 +658,12 @@ export function generateSecurityReport({
  */
 export function isAiAvailable() {
   if (process.env.SKIP_AI_REVIEW === "true") return false;
-  if (process.env.GEMINI_API_KEY || process.env.OPENAI_API_KEY) return true;
+  if (
+    process.env.OPENAI_API_KEY ||
+    process.env.GEMINI_API_KEY ||
+    process.env.DEEPSEEK_API_KEY
+  )
+    return true;
 
   try {
     const bin = process.env.OPENCODE_BIN || "opencode";
@@ -674,6 +679,44 @@ export function isAiAvailable() {
   } catch {
     return false;
   }
+}
+
+/**
+ * 格式化 AI 回應，自動處理推理模型（如 DeepSeek-R1 / deepseek-reasoner）與普通聊天模型（deepseek-chat）的差異：
+ * 1. 支援提取 message.reasoning_content 並以可折疊的 <details> 標籤呈現。
+ * 2. 支援解析文字中的 <think>...</think> 思考標籤並轉為折疊區塊。
+ * 3. 確保最終審查結論與思考過程清晰分離，避免 PR 留言被大段思考過程淹沒。
+ */
+export function formatAiResponse(input) {
+  if (!input) return null;
+
+  if (typeof input === "object" && input !== null) {
+    const content = String(input.content || "").trim();
+    const reasoning = String(input.reasoning_content || "").trim();
+
+    if (reasoning && content) {
+      return `<details>\n<summary>💭 展開 DeepSeek 推理思考過程 (Reasoning Process)</summary>\n\n${reasoning}\n\n</details>\n\n${content}`;
+    }
+    if (content) return content;
+    if (reasoning) return reasoning;
+    return null;
+  }
+
+  const text = String(input).trim();
+  if (!text) return null;
+
+  // 處理 CLI 或第三方代理輸出的 <think>...</think> 標籤
+  const thinkMatch = text.match(/<think>([\s\S]*?)<\/think>/i);
+  if (thinkMatch) {
+    const reasoning = thinkMatch[1].trim();
+    const cleanContent = text.replace(/<think>[\s\S]*?<\/think>/i, "").trim();
+    if (reasoning && cleanContent) {
+      return `<details>\n<summary>💭 展開 DeepSeek 推理思考過程 (Reasoning Process)</summary>\n\n${reasoning}\n\n</details>\n\n${cleanContent}`;
+    }
+    if (cleanContent) return cleanContent;
+  }
+
+  return text;
 }
 
 /**
@@ -693,15 +736,158 @@ export async function runAiReview(diffText, options = {}) {
     return runner(fullMessage, options);
   }
 
+  const timeoutMs = options.timeoutMs || 30000;
+  const openaiKey = process.env.OPENAI_API_KEY?.trim();
+  const geminiKey = process.env.GEMINI_API_KEY?.trim();
+  const deepseekKey = process.env.DEEPSEEK_API_KEY?.trim();
+
+  // 1. 第一優先：若配置了 OPENAI_API_KEY，透過 OpenAI 規範調用（支援 Opencode Provider、自訂 Endpoint 或 DeepSeek 轉發）
+  if (openaiKey) {
+    try {
+      const isDeepseek =
+        process.env.OPENAI_MODEL?.toLowerCase().includes("deepseek") ||
+        process.env.OPENAI_BASE_URL?.toLowerCase().includes("deepseek");
+      const endpoint =
+        process.env.OPENAI_BASE_URL?.trim() ||
+        (isDeepseek ? "https://api.deepseek.com" : "https://api.openai.com/v1");
+      const defaultModel =
+        process.env.OPENAI_MODEL ||
+        process.env.OPENCODE_MODEL ||
+        (isDeepseek ? "deepseek-chat" : "gpt-4o-mini");
+      const isReasoner =
+        defaultModel.includes("reasoner") ||
+        defaultModel.includes("deepseek-r1");
+
+      const bodyPayload = {
+        model: defaultModel,
+        messages: [
+          {
+            role: "system",
+            content:
+              "你是一名資安架構專家。請以正體中文審查 Pull Request 的代碼變更，分析是否有資料外洩、未授權連線、加密竄改、後門或架構弱點，並提供具體建議。",
+          },
+          { role: "user", content: fullMessage },
+        ],
+      };
+      if (!isReasoner) {
+        bodyPayload.temperature = 0.2;
+      }
+
+      const response = await fetch(
+        `${endpoint.replace(/\/+$/, "")}/chat/completions`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${openaiKey}`,
+          },
+          body: JSON.stringify(bodyPayload),
+          signal: AbortSignal.timeout(timeoutMs),
+        },
+      );
+
+      if (response.ok) {
+        const data = await response.json();
+        const formatted = formatAiResponse(data.choices?.[0]?.message);
+        if (formatted) return formatted;
+      }
+    } catch {
+      // 遇到異常時降級嘗試其他方式
+    }
+  }
+
+  // 2. 第二優先：若配置了 GEMINI_API_KEY，透過 Gemini API 調用
+  if (geminiKey) {
+    try {
+      const geminiModel =
+        process.env.GEMINI_MODEL ||
+        process.env.OPENCODE_MODEL ||
+        "gemini-2.5-flash";
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/${geminiModel}:generateContent?key=${geminiKey}`;
+      const response = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: fullMessage }] }],
+        }),
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        const formatted = formatAiResponse(
+          data.candidates?.[0]?.content?.parts?.[0]?.text,
+        );
+        if (formatted) return formatted;
+      }
+    } catch {
+      // 遇到異常時降級
+    }
+  }
+
+  // 3. 第三優先：若配置了 DEEPSEEK_API_KEY，調用 DeepSeek 官方 API
+  if (deepseekKey) {
+    try {
+      const endpoint =
+        process.env.DEEPSEEK_BASE_URL?.trim() || "https://api.deepseek.com";
+      const model =
+        process.env.DEEPSEEK_MODEL ||
+        process.env.OPENCODE_MODEL ||
+        "deepseek-chat";
+      const isReasoner =
+        model.includes("reasoner") || model.includes("deepseek-r1");
+
+      const bodyPayload = {
+        model,
+        messages: [
+          {
+            role: "system",
+            content:
+              "你是一名資安架構專家。請以正體中文審查 Pull Request 的代碼變更，分析是否有資料外洩、未授權連線、加密竄改、後門或架構弱點，並提供具體建議。",
+          },
+          { role: "user", content: fullMessage },
+        ],
+      };
+      // deepseek-reasoner 不支援自訂 temperature 參數
+      if (!isReasoner) {
+        bodyPayload.temperature = 0.2;
+      }
+
+      const response = await fetch(
+        `${endpoint.replace(/\/+$/, "")}/chat/completions`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${deepseekKey}`,
+          },
+          body: JSON.stringify(bodyPayload),
+          signal: AbortSignal.timeout(timeoutMs),
+        },
+      );
+
+      if (response.ok) {
+        const data = await response.json();
+        const formatted = formatAiResponse(data.choices?.[0]?.message);
+        if (formatted) return formatted;
+      }
+    } catch {
+      // 遇異常降級嘗試其他方式
+    }
+  }
+
+  // 4. 嘗試呼叫本地 opencode CLI
   const bin = process.env.OPENCODE_BIN || "opencode";
   const isNodeScript = bin.endsWith(".js") || bin.endsWith(".mjs");
   const cmd = isNodeScript ? process.execPath : bin;
-  const timeoutMs = options.timeoutMs || 30000;
 
   try {
+    const modelArg = process.env.OPENCODE_MODEL
+      ? ["-m", process.env.OPENCODE_MODEL]
+      : [];
     const args = isNodeScript
-      ? [bin, "run", "--pure", fullMessage]
-      : ["run", "--pure", fullMessage];
+      ? [bin, "run", "--pure", ...modelArg, fullMessage]
+      : ["run", "--pure", ...modelArg, fullMessage];
 
     const result = spawnSync(cmd, args, {
       encoding: "utf8",
@@ -714,7 +900,7 @@ export async function runAiReview(diffText, options = {}) {
       return null;
     }
 
-    return result.stdout?.trim() || null;
+    return formatAiResponse(result.stdout?.trim()) || null;
   } catch {
     return null;
   }
