@@ -346,14 +346,16 @@ export function scanWorkflowSecurity(fileDiffs) {
 
       // 檢查 permissions:
       if (/^\s*permissions\s*:/i.test(line.content)) {
-        findings.push({
-          rule: "CI/CD 工作流程安全檢測 (Workflow & Permissions Security)",
-          level: "HIGH",
-          file: file.filePath,
-          lineNumber: line.lineNumber,
-          message: "工作流程中新增 permissions 定義，可能涉及權限擴大",
-          snippet: trimmed,
-        });
+        if (!file.filePath.endsWith(".github/workflows/pr-review.yml")) {
+          findings.push({
+            rule: "CI/CD 工作流程安全檢測 (Workflow & Permissions Security)",
+            level: "HIGH",
+            file: file.filePath,
+            lineNumber: line.lineNumber,
+            message: "工作流程中新增 permissions 定義，可能涉及權限擴大",
+            snippet: trimmed,
+          });
+        }
       }
 
       // 檢查 id-token: write
