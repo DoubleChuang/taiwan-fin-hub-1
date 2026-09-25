@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  formatAiResponse,
   generateSecurityReport,
   isApprovedDomain,
   parseCliArgs,
@@ -353,4 +354,33 @@ test("postPrComment: 在非 dry-run 且指定 --pr 時呼叫 gh pr comment", asy
     "99",
     "--body-file",
   ]);
+});
+
+test("formatAiResponse: 正確處理普通 Chat 回應與 DeepSeek-R1 推理思考過程", () => {
+  // 1. 一般 Chat 模型回應
+  assert.equal(
+    formatAiResponse({ content: "無安全漏洞" }),
+    "無安全漏洞",
+  );
+
+  // 2. DeepSeek-R1 reasoning_content 物件
+  const r1Response = formatAiResponse({
+    content: "分析結論：此變更安全。",
+    reasoning_content: "首先檢視 diff 是否有危險呼叫...",
+  });
+  assert.match(r1Response, /<details>/);
+  assert.match(r1Response, /💭 展開 DeepSeek 推理思考過程/);
+  assert.match(r1Response, /首先檢視 diff 是否有危險呼叫/);
+  assert.match(r1Response, /分析結論：此變更安全。/);
+
+  // 3. 含 <think> 標籤之純文字（CLI 輸出格式）
+  const thinkText = "<think>思考連線安全性...</think>\n審查通過。";
+  const formattedThink = formatAiResponse(thinkText);
+  assert.match(formattedThink, /<details>/);
+  assert.match(formattedThink, /思考連線安全性/);
+  assert.match(formattedThink, /審查通過。/);
+
+  // 4. 空值與無效內容保護
+  assert.equal(formatAiResponse(null), null);
+  assert.equal(formatAiResponse(""), null);
 });
