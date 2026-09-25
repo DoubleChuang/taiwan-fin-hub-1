@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import {
+  mkdtempSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -124,13 +130,14 @@ function createImportedDeployment(root, upstream, options = {}) {
   return { bare, beforeSync, rootCommit, worktree };
 }
 
-function runUpdater(worktree, upstreamBare) {
+function runUpdater(worktree, upstreamBare, options = {}) {
   return run(process.execPath, [scriptPath], {
     cwd: worktree,
     allowFailure: true,
     env: {
       ...process.env,
       SYNC_UPSTREAM_URL: upstreamBare,
+      ...options.env,
     },
   });
 }
@@ -528,5 +535,173 @@ test("只有上游 workflow 變更時以 allow-empty commit 更新 baseline", ()
       new RegExp(`Taiwan-Fin-Hub-Upstream: ${workflowOnlyCommit}`),
     );
     assert.match(result.stdout, /保留部署版本/);
+  });
+});
+
+test("啟用 SYNC_CREATE_PR 時推送到 sync branch 並透過 gh 建立 PR 與輸出 GITHUB_OUTPUT", () => {
+  withTemporaryRepository((root) => {
+    const upstream = createUpstream(root);
+    const deployment = createImportedDeployment(root, upstream);
+
+    const mockGhScript = path.join(root, "mock-gh.mjs");
+    const callsLog = path.join(root, "gh-calls.json");
+    const outputFile = path.join(root, "github-output.txt");
+    writeFileSync(outputFile, "");
+    writeFileSync(
+      mockGhScript,
+      `import { appendFileSync } from "node:fs";
+const args = process.argv.slice(2);
+appendFileSync(${JSON.stringify(callsLog)}, JSON.stringify(args) + "\\n");
+if (args[0] === "--version") {
+  console.log("gh version 2.0.0 (mock)");
+  process.exit(0);
+}
+if (args[0] === "pr" && args[1] === "list") {
+  console.log("[]");
+  process.exit(0);
+}
+if (args[0] === "pr" && args[1] === "create") {
+  console.log("https://github.com/example/repo/pull/123");
+  process.exit(0);
+}
+process.exit(0);
+`,
+    );
+
+    const result = runUpdater(deployment.worktree, upstream.bare, {
+      env: {
+        SYNC_CREATE_PR: "true",
+        GH_BIN: mockGhScript,
+        GITHUB_OUTPUT: outputFile,
+      },
+    });
+
+    assert.equal(result.status, 0, result.stderr);
+
+    const syncBranch = `sync/upstream-${upstream.latestCommit.slice(0, 10)}`;
+    const newHead = git(deployment.worktree, "rev-parse", "HEAD");
+
+    assert.equal(
+      remoteBranch(deployment.worktree, "main"),
+      deployment.beforeSync,
+    );
+    assert.equal(remoteBranch(deployment.worktree, syncBranch), newHead);
+
+    assert.equal(
+      readFileSync(outputFile, "utf8"),
+      "pr_number=123\npr_url=https://github.com/example/repo/pull/123\n",
+    );
+
+    const calls = readFileSync(callsLog, "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    const prListCall = calls.find((c) => c[0] === "pr" && c[1] === "list");
+    assert.ok(prListCall);
+    assert.ok(prListCall.includes("--head"));
+    assert.ok(prListCall.includes(syncBranch));
+    assert.ok(prListCall.includes("--json"));
+    assert.ok(prListCall.includes("number,url"));
+
+    const prCreateCall = calls.find((c) => c[0] === "pr" && c[1] === "create");
+    assert.ok(prCreateCall);
+    assert.ok(prCreateCall.includes("--base"));
+    assert.ok(prCreateCall.includes("main"));
+    assert.ok(prCreateCall.includes("--head"));
+    assert.ok(prCreateCall.includes(syncBranch));
+    assert.ok(prCreateCall.includes("--title"));
+    assert.ok(
+      prCreateCall.includes(
+        `chore(upstream): 同步上游版本 ${upstream.latestCommit.slice(0, 10)}`,
+      ),
+    );
+    assert.ok(prCreateCall.includes("--body"));
+    const bodyIndex = prCreateCall.indexOf("--body") + 1;
+    assert.match(prCreateCall[bodyIndex], /## 上游自動同步 PR/);
+    assert.match(
+      prCreateCall[bodyIndex],
+      new RegExp(`上游 Commit: ${upstream.latestCommit}`),
+    );
+    assert.match(
+      prCreateCall[bodyIndex],
+      new RegExp(`基準 Commit: ${upstream.firstCommit}`),
+    );
+  });
+});
+
+test("啟用 SYNC_CREATE_PR 且已有 PR 時沿用既有 PR number 且不重複建立", () => {
+  withTemporaryRepository((root) => {
+    const upstream = createUpstream(root);
+    const deployment = createImportedDeployment(root, upstream);
+
+    const mockGhScript = path.join(root, "mock-gh.mjs");
+    const callsLog = path.join(root, "gh-calls.json");
+    const outputFile = path.join(root, "github-output.txt");
+    writeFileSync(outputFile, "");
+    writeFileSync(
+      mockGhScript,
+      `import { appendFileSync } from "node:fs";
+const args = process.argv.slice(2);
+appendFileSync(${JSON.stringify(callsLog)}, JSON.stringify(args) + "\\n");
+if (args[0] === "--version") {
+  console.log("gh version 2.0.0 (mock)");
+  process.exit(0);
+}
+if (args[0] === "pr" && args[1] === "list") {
+  console.log(
+    JSON.stringify([
+      {
+        number: 888,
+        url: "https://github.com/example/repo/pull/888",
+      },
+    ]),
+  );
+  process.exit(0);
+}
+if (args[0] === "pr" && args[1] === "create") {
+  console.log("https://github.com/example/repo/pull/999");
+  process.exit(0);
+}
+process.exit(0);
+`,
+    );
+
+    const result = runUpdater(deployment.worktree, upstream.bare, {
+      env: {
+        SYNC_CREATE_PR: "true",
+        GH_BIN: mockGhScript,
+        GITHUB_OUTPUT: outputFile,
+      },
+    });
+
+    assert.equal(result.status, 0, result.stderr);
+
+    const syncBranch = `sync/upstream-${upstream.latestCommit.slice(0, 10)}`;
+    const newHead = git(deployment.worktree, "rev-parse", "HEAD");
+
+    assert.equal(
+      remoteBranch(deployment.worktree, "main"),
+      deployment.beforeSync,
+    );
+    assert.equal(remoteBranch(deployment.worktree, syncBranch), newHead);
+
+    assert.equal(
+      readFileSync(outputFile, "utf8"),
+      "pr_number=888\npr_url=https://github.com/example/repo/pull/888\n",
+    );
+
+    const calls = readFileSync(callsLog, "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    const prListCall = calls.find((c) => c[0] === "pr" && c[1] === "list");
+    assert.ok(prListCall);
+    assert.ok(prListCall.includes("--head"));
+    assert.ok(prListCall.includes(syncBranch));
+    assert.ok(prListCall.includes("--json"));
+    assert.ok(prListCall.includes("number,url"));
+
+    const prCreateCall = calls.find((c) => c[0] === "pr" && c[1] === "create");
+    assert.equal(prCreateCall, undefined);
   });
 });

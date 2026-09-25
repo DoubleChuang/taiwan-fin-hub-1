@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { appendFileSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -42,6 +42,57 @@ function runGit(args, options = {}) {
 
 function gitText(args, options) {
   return runGit(args, options).stdout.trim();
+}
+
+function runGh(args, options = {}) {
+  const { allowedExitCodes = [0], environment = {} } = options;
+  const ghBin = process.env.GH_BIN?.trim() || "gh";
+  const isNodeScript = ghBin.endsWith(".js") || ghBin.endsWith(".mjs");
+  const command = isNodeScript ? process.execPath : ghBin;
+  const commandArgs = isNodeScript ? [ghBin, ...args] : args;
+
+  const result = spawnSync(command, commandArgs, {
+    cwd: process.cwd(),
+    encoding: "utf8",
+    env: { ...process.env, ...environment },
+    maxBuffer: 64 * 1024 * 1024,
+  });
+
+  if (result.error) {
+    throw new SyncError(
+      `無法執行 gh ${args.join(" ")}：${result.error.message}`,
+    );
+  }
+
+  if (!allowedExitCodes.includes(result.status)) {
+    const stdout = result.stdout?.toString().trim();
+    const stderr = result.stderr?.toString().trim();
+    const details = [stdout, stderr].filter(Boolean).join("\n");
+    throw new SyncError(
+      `gh ${args.join(" ")} 執行失敗（exit ${result.status}）${
+        details ? `：\n${details}` : ""
+      }`,
+    );
+  }
+
+  return result;
+}
+
+function isGhAvailable() {
+  try {
+    const ghBin = process.env.GH_BIN?.trim() || "gh";
+    const isNodeScript = ghBin.endsWith(".js") || ghBin.endsWith(".mjs");
+    const command = isNodeScript ? process.execPath : ghBin;
+    const commandArgs = isNodeScript ? [ghBin, "--version"] : ["--version"];
+    const result = spawnSync(command, commandArgs, {
+      cwd: process.cwd(),
+      encoding: "utf8",
+      maxBuffer: 1024 * 1024,
+    });
+    return !result.error && result.status === 0;
+  } catch {
+    return false;
+  }
 }
 
 function assertCleanWorkingTree() {
@@ -422,9 +473,78 @@ function syncUpstream() {
   const mergedTree = buildMergedTree(baseline, upstreamRef);
   createSyncCommit(mergedTree, upstreamCommit, before);
 
-  console.log(`推送更新至 ${originRemote}/${targetBranch}...`);
-  runGit(["push", originRemote, `HEAD:refs/heads/${targetBranch}`]);
-  console.log("同步完成；Cloudflare Workers Builds 將自動重新部署。");
+  if (process.env.SYNC_CREATE_PR === "true") {
+    const syncBranch = `sync/upstream-${upstreamCommit.slice(0, 10)}`;
+    console.log(`推送更新至 ${originRemote}/${syncBranch}...`);
+    runGit(["push", originRemote, `HEAD:refs/heads/${syncBranch}`, "--force"]);
+
+    if (isGhAvailable()) {
+      let prNumber = "";
+      let prUrl = "";
+      const listResult = runGh([
+        "pr",
+        "list",
+        "--head",
+        syncBranch,
+        "--json",
+        "number,url",
+      ]);
+      try {
+        const raw = listResult.stdout.trim();
+        const prs = raw ? JSON.parse(raw) : [];
+        if (Array.isArray(prs) && prs.length > 0 && prs[0]?.number) {
+          prNumber = String(prs[0].number);
+          prUrl = prs[0].url || "";
+        }
+      } catch {
+        // Fallback in case stdout isn't valid JSON
+      }
+
+      if (prNumber) {
+        console.log(`已存在 PR #${prNumber}。`);
+      } else {
+        const title = `chore(upstream): 同步上游版本 ${upstreamCommit.slice(0, 10)}`;
+        const body = `## 上游自動同步 PR\n\n- 上游 Commit: ${upstreamCommit}\n- 基準 Commit: ${baseline}\n\n此 PR 由排程同步自動發起，請先進行安全審查後再行合併。`;
+        const createResult = runGh([
+          "pr",
+          "create",
+          "--base",
+          targetBranch,
+          "--head",
+          syncBranch,
+          "--title",
+          title,
+          "--body",
+          body,
+        ]);
+        const stdout = createResult.stdout.trim();
+        const urlMatch = stdout.match(/https?:\/\/[^\s]+/);
+        if (urlMatch) {
+          prUrl = urlMatch[0];
+        }
+        const match = stdout.match(/\/pull\/(\d+)/) || stdout.match(/(\d+)/);
+        if (match) {
+          prNumber = match[1];
+        }
+        console.log(`已建立同步 PR${prNumber ? ` #${prNumber}` : ""}。`);
+      }
+
+      if (process.env.GITHUB_OUTPUT) {
+        if (prNumber) {
+          appendFileSync(process.env.GITHUB_OUTPUT, `pr_number=${prNumber}\n`);
+        }
+        if (prUrl) {
+          appendFileSync(process.env.GITHUB_OUTPUT, `pr_url=${prUrl}\n`);
+        }
+      }
+    }
+
+    console.log("同步完成；已建立更新 branch/PR 等待審查。");
+  } else {
+    console.log(`推送更新至 ${originRemote}/${targetBranch}...`);
+    runGit(["push", originRemote, `HEAD:refs/heads/${targetBranch}`]);
+    console.log("同步完成；Cloudflare Workers Builds 將自動重新部署。");
+  }
 }
 
 try {
