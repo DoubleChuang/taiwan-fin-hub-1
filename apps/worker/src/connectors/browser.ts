@@ -1,12 +1,59 @@
 import puppeteer from "@cloudflare/puppeteer";
+import type { Env } from "../platform/env";
 
 const RETRY_DELAYS_MS = [2_000, 5_000] as const;
 
-/** Retry only rejected browser acquisition, before a session or login exists. */
+export type BrowserBindingWithRelay = Parameters<typeof puppeteer.launch>[0] & {
+  relayWsEndpoint?: string;
+};
+
+/**
+ * Creates a browser binding that routes to a remote Taiwan Chrome CDP endpoint
+ * if RELAY_CDP_WS_ENDPOINT is configured in env, or falls back to Cloudflare BROWSER binding.
+ */
+export function createBrowserBinding(
+  env: Pick<Env, "BROWSER" | "RELAY_CDP_WS_ENDPOINT">,
+): Fetcher {
+  const relayWs = env.RELAY_CDP_WS_ENDPOINT?.trim();
+  if (!relayWs) {
+    return env.BROWSER;
+  }
+
+  const baseFetcher: Fetcher = env.BROWSER ?? {
+    async fetch() {
+      throw new Error("Cloudflare BROWSER binding is not available.");
+    },
+  };
+
+  return Object.assign(baseFetcher, { relayWsEndpoint: relayWs });
+}
+
+/**
+ * Retry only rejected browser acquisition, before a session or login exists.
+ * When relayWsEndpoint is configured (either directly or via the binding),
+ * connects directly to the remote CDP WebSocket endpoint (e.g. Taiwan Chrome).
+ */
 export async function launchBrowserWithRetry(
-  binding: Parameters<typeof puppeteer.launch>[0],
+  binding: BrowserBindingWithRelay,
   options?: Parameters<typeof puppeteer.launch>[1],
+  relayWsEndpoint?: string,
 ) {
+  const targetWsEndpoint =
+    relayWsEndpoint?.trim() || binding?.relayWsEndpoint?.trim();
+
+  if (targetWsEndpoint) {
+    try {
+      return await puppeteer.connect({
+        browserWSEndpoint: targetWsEndpoint,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      throw new Error(
+        `無法連線至台灣 Chrome CDP 端點 (${targetWsEndpoint}): ${message}`,
+      );
+    }
+  }
+
   return puppeteer.launch(
     {
       async fetch(input, init) {
