@@ -659,9 +659,9 @@ export function generateSecurityReport({
 export function isAiAvailable() {
   if (process.env.SKIP_AI_REVIEW === "true") return false;
   if (
-    process.env.DEEPSEEK_API_KEY ||
+    process.env.OPENAI_API_KEY ||
     process.env.GEMINI_API_KEY ||
-    process.env.OPENAI_API_KEY
+    process.env.DEEPSEEK_API_KEY
   )
     return true;
 
@@ -737,62 +737,11 @@ export async function runAiReview(diffText, options = {}) {
   }
 
   const timeoutMs = options.timeoutMs || 30000;
-  const deepseekKey = process.env.DEEPSEEK_API_KEY?.trim();
   const openaiKey = process.env.OPENAI_API_KEY?.trim();
   const geminiKey = process.env.GEMINI_API_KEY?.trim();
+  const deepseekKey = process.env.DEEPSEEK_API_KEY?.trim();
 
-  // 1. 若配置了 DEEPSEEK_API_KEY，優先調用 DeepSeek 官方 API
-  if (deepseekKey) {
-    try {
-      const endpoint =
-        process.env.DEEPSEEK_BASE_URL?.trim() || "https://api.deepseek.com";
-      const model =
-        process.env.DEEPSEEK_MODEL ||
-        process.env.OPENCODE_MODEL ||
-        "deepseek-chat";
-      const isReasoner =
-        model.includes("reasoner") || model.includes("deepseek-r1");
-
-      const bodyPayload = {
-        model,
-        messages: [
-          {
-            role: "system",
-            content:
-              "你是一名資安架構專家。請以正體中文審查 Pull Request 的代碼變更，分析是否有資料外洩、未授權連線、加密竄改、後門或架構弱點，並提供具體建議。",
-          },
-          { role: "user", content: fullMessage },
-        ],
-      };
-      // deepseek-reasoner 不支援自訂 temperature 參數
-      if (!isReasoner) {
-        bodyPayload.temperature = 0.2;
-      }
-
-      const response = await fetch(
-        `${endpoint.replace(/\/+$/, "")}/chat/completions`,
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${deepseekKey}`,
-          },
-          body: JSON.stringify(bodyPayload),
-          signal: AbortSignal.timeout(timeoutMs),
-        },
-      );
-
-      if (response.ok) {
-        const data = await response.json();
-        const formatted = formatAiResponse(data.choices?.[0]?.message);
-        if (formatted) return formatted;
-      }
-    } catch {
-      // 遇異常降級嘗試其他方式
-    }
-  }
-
-  // 2. 若配置了 OPENAI_API_KEY，透過 OpenAI 規範調用（亦支援 DeepSeek 轉發或自訂 Endpoint）
+  // 1. 第一優先：若配置了 OPENAI_API_KEY，透過 OpenAI 規範調用（支援 Opencode Provider、自訂 Endpoint 或 DeepSeek 轉發）
   if (openaiKey) {
     try {
       const isDeepseek =
@@ -847,7 +796,7 @@ export async function runAiReview(diffText, options = {}) {
     }
   }
 
-  // 3. 若配置了 GEMINI_API_KEY，透過 Gemini API 調用
+  // 2. 第二優先：若配置了 GEMINI_API_KEY，透過 Gemini API 調用
   if (geminiKey) {
     try {
       const geminiModel =
@@ -873,6 +822,57 @@ export async function runAiReview(diffText, options = {}) {
       }
     } catch {
       // 遇到異常時降級
+    }
+  }
+
+  // 3. 第三優先：若配置了 DEEPSEEK_API_KEY，調用 DeepSeek 官方 API
+  if (deepseekKey) {
+    try {
+      const endpoint =
+        process.env.DEEPSEEK_BASE_URL?.trim() || "https://api.deepseek.com";
+      const model =
+        process.env.DEEPSEEK_MODEL ||
+        process.env.OPENCODE_MODEL ||
+        "deepseek-chat";
+      const isReasoner =
+        model.includes("reasoner") || model.includes("deepseek-r1");
+
+      const bodyPayload = {
+        model,
+        messages: [
+          {
+            role: "system",
+            content:
+              "你是一名資安架構專家。請以正體中文審查 Pull Request 的代碼變更，分析是否有資料外洩、未授權連線、加密竄改、後門或架構弱點，並提供具體建議。",
+          },
+          { role: "user", content: fullMessage },
+        ],
+      };
+      // deepseek-reasoner 不支援自訂 temperature 參數
+      if (!isReasoner) {
+        bodyPayload.temperature = 0.2;
+      }
+
+      const response = await fetch(
+        `${endpoint.replace(/\/+$/, "")}/chat/completions`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${deepseekKey}`,
+          },
+          body: JSON.stringify(bodyPayload),
+          signal: AbortSignal.timeout(timeoutMs),
+        },
+      );
+
+      if (response.ok) {
+        const data = await response.json();
+        const formatted = formatAiResponse(data.choices?.[0]?.message);
+        if (formatted) return formatted;
+      }
+    } catch {
+      // 遇異常降級嘗試其他方式
     }
   }
 
