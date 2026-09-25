@@ -40,11 +40,6 @@ binding = "AI"
 binding = "SYNC_QUEUE"
 queue = "taiwan-fin-hub-sync"
 
-[[previews.d1_databases]]
-binding = "DB"
-database_name = "taiwan-fin-hub"
-migrations_dir = "packages/db/migrations"
-
 [observability]
 enabled = true
 head_sampling_rate = 1
