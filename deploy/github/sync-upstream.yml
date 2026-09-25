@@ -56,5 +56,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_MODEL: ${{ vars.OPENAI_MODEL || '' }}
+          OPENAI_BASE_URL: ${{ vars.OPENAI_BASE_URL || '' }}
         run: |
           node scripts/review-pr-security.mjs --pr "${{ steps.sync.outputs.pr_number }}"

@@ -693,15 +693,88 @@ export async function runAiReview(diffText, options = {}) {
     return runner(fullMessage, options);
   }
 
+  const timeoutMs = options.timeoutMs || 30000;
+  const openaiKey = process.env.OPENAI_API_KEY?.trim();
+  const geminiKey = process.env.GEMINI_API_KEY?.trim();
+  const defaultModel =
+    process.env.OPENAI_MODEL || process.env.OPENCODE_MODEL || "gpt-4o-mini";
+
+  // 1. 若配置了 OPENAI_API_KEY，優先透過原生 fetch 調用 OpenAI API（無需於 CI 安裝全域 CLI）
+  if (openaiKey) {
+    try {
+      const endpoint =
+        process.env.OPENAI_BASE_URL?.trim() || "https://api.openai.com/v1";
+      const response = await fetch(`${endpoint}/chat/completions`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${openaiKey}`,
+        },
+        body: JSON.stringify({
+          model: defaultModel,
+          messages: [
+            {
+              role: "system",
+              content:
+                "你是一名資安架構專家。請以正體中文審查 Pull Request 的代碼變更，分析是否有資料外洩、未授權連線、加密竄改、後門或架構弱點，並提供具體建議。",
+            },
+            { role: "user", content: fullMessage },
+          ],
+          temperature: 0.2,
+        }),
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        const content = data.choices?.[0]?.message?.content?.trim();
+        if (content) return content;
+      }
+    } catch {
+      // 遇到異常時降級嘗試其他方式
+    }
+  }
+
+  // 2. 若配置了 GEMINI_API_KEY，透過 Gemini API 調用
+  if (geminiKey) {
+    try {
+      const geminiModel =
+        process.env.GEMINI_MODEL ||
+        process.env.OPENCODE_MODEL ||
+        "gemini-2.5-flash";
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/${geminiModel}:generateContent?key=${geminiKey}`;
+      const response = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: fullMessage }] }],
+        }),
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        const content =
+          data.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
+        if (content) return content;
+      }
+    } catch {
+      // 遇到異常時降級
+    }
+  }
+
+  // 3. 嘗試呼叫本地 opencode CLI
   const bin = process.env.OPENCODE_BIN || "opencode";
   const isNodeScript = bin.endsWith(".js") || bin.endsWith(".mjs");
   const cmd = isNodeScript ? process.execPath : bin;
-  const timeoutMs = options.timeoutMs || 30000;
 
   try {
+    const modelArg = process.env.OPENCODE_MODEL
+      ? ["-m", process.env.OPENCODE_MODEL]
+      : [];
     const args = isNodeScript
-      ? [bin, "run", "--pure", fullMessage]
-      : ["run", "--pure", fullMessage];
+      ? [bin, "run", "--pure", ...modelArg, fullMessage]
+      : ["run", "--pure", ...modelArg, fullMessage];
 
     const result = spawnSync(cmd, args, {
       encoding: "utf8",
