@@ -39,7 +39,7 @@ describe("createRelayFetch", () => {
 
     expect(fetcher).toBeDefined();
 
-    const response = await fetcher!("https://api.example.bank.tw/v1/accounts", {
+    const response = await fetcher!("https://api.example.com/v1/accounts", {
       method: "POST",
       headers: {
         Authorization: "Bearer token123",
@@ -61,7 +61,7 @@ describe("createRelayFetch", () => {
 
     const sentPayload = JSON.parse(String(calledInit?.body));
     expect(sentPayload).toEqual({
-      url: "https://api.example.bank.tw/v1/accounts",
+      url: "https://api.example.com/v1/accounts",
       method: "POST",
       headers: {
         authorization: "Bearer token123",
@@ -86,7 +86,7 @@ describe("createRelayFetch", () => {
     );
 
     const params = new URLSearchParams({ code: "123", state: "abc" });
-    await fetcher!("https://api.example.bank.tw/oauth/token", {
+    await fetcher!("https://api.example.com/oauth/token", {
       method: "POST",
       body: params,
     });
@@ -103,7 +103,7 @@ describe("createRelayFetch", () => {
     });
 
     await expect(
-      fetcher!("https://api.example.bank.tw", {
+      fetcher!("https://api.example.com", {
         method: "POST",
         body: new Uint8Array([1, 2, 3]) as unknown as BodyInit,
       }),

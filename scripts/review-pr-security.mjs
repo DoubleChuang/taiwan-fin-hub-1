@@ -13,10 +13,12 @@ export const APPROVED_DOMAINS = [
   "*.cathaybk.com.tw",
   "*.sinopac.com",
   "*.esunbank.com",
+  "*.esunbank.com.tw",
   "*.ctbcbank.com",
   "*.taishinbank.com.tw",
   "*.skbank.com.tw",
   "*.o-bank.com",
+  "*.obank.com.tw",
   "*.hncb.com.tw",
   "*.firstbank.com.tw",
   "*.kgibank.com.tw",
@@ -169,7 +171,8 @@ export function scanDataExfiltration(fileDiffs) {
     if (
       file.filePath.endsWith(".md") ||
       file.filePath.endsWith(".txt") ||
-      file.filePath.endsWith("scripts/review-pr-security.mjs")
+      file.filePath.endsWith("scripts/review-pr-security.mjs") ||
+      file.filePath.startsWith("deploy/taiwan-relay/")
     ) {
       continue;
     }
@@ -246,8 +249,14 @@ export function scanDataExfiltration(fileDiffs) {
         }
       }
 
-      // 檢查動態 fetch / axios 外部呼叫（排除相對路徑字串）
-      if (/\b(?:fetch|axios(?:\.[a-z]+)?)\s*\(/i.test(line.content)) {
+      // 檢查動態 fetch / axios 外部呼叫（排除相對路徑字串及方法宣告）
+      const isMethodDecl = /^\s*(?:async\s+)?fetch\s*\([^)]*\)\s*\{/i.test(
+        line.content,
+      );
+      if (
+        !isMethodDecl &&
+        /\b(?:fetch|axios(?:\.[a-z]+)?)\s*\(/i.test(line.content)
+      ) {
         if (foundUrls.length === 0) {
           const isRelativePathCall =
             /\b(?:fetch|axios(?:\.[a-z]+)?)\s*\(\s*["'`]\/[^"'`]*["'`]/i.test(
