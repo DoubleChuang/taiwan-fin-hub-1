@@ -200,9 +200,10 @@ Middleware 應只處理跨功能的 request concern，不應承擔 feature 商�
 
 ### `apps/worker/src/connectors/`
 
-需要 Cloudflare Worker bindings 的 connector adapter，例如：
+需要 Cloudflare Worker bindings 或出口轉發的 connector adapter，例如：
 
-- Browser Rendering。
+- Browser Rendering 與遠端 CDP 連線（`browser.ts`，支援透過 `RELAY_CDP_WS_ENDPOINT` 連至台灣 Chrome CDP 端點）。
+- 泛用 HTTP Relay 轉發工廠（`relay-fetch.ts`，支援透過 `RELAY_HTTP_URL` 與 `RELAY_HTTP_TOKEN` 將 API 請求導向台灣出口）。
 - Puppeteer browser lifecycle。
 - Workers AI。
 - Worker-specific session management。

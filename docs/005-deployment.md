@@ -141,6 +141,17 @@ npm run db:migrate:remote
 
 中信行動銀行的 TLS endpoint 無法由 local workerd 直接連線，因此 `npm run dev` 會自動啟動只監聽 `127.0.0.1`、限制目的端點並使用單次隨機 token 的 Node relay；正式 Worker 不使用此 relay。
 
+## 台灣端雙軌 Relay（解決海外／資料中心 IP 風控阻擋）
+
+若銀行端（如第一銀行、華南銀行等爬蟲，或中信、新光等 API）對 Cloudflare 資料中心 IP 進行風控阻擋，可於台灣家用主機（NAS、PC、迷你主機）啟動雙軌 Relay，並透過 Cloudflare Tunnel 建立安全通道：
+
+- **部署台灣端服務**：請參考 `deploy/taiwan-relay/README.md`，使用 Docker Compose 啟動包含 HTTP Relay、Browserless Chrome 與 Cloudflared 的服務。
+- **正式環境變數**：在 Worker 的 `wrangler.toml`（或 Cloudflare Worker Secrets）中設定：
+  - `RELAY_HTTP_URL`：例如 `https://relay.yourdomain.com/proxy`（轉發 API 連接器請求）。
+  - `RELAY_HTTP_TOKEN`：台灣端 HTTP Relay 之驗證 Token。
+  - `RELAY_CDP_WS_ENDPOINT`：例如 `wss://relay.yourdomain.com/devtools/browser?token=...`（將第一銀行、華南銀行等網銀爬蟲導向台灣端的 Chrome 實例）。
+- 若未設定上述變數，Worker 預設維持直連外部 API 與 Cloudflare Browser Rendering。
+
 ## Demo 模式
 
 設定 `DEMO_MODE=true` 會略過 Cloudflare Access 登入、只允許唯讀 API，並停止背景排程同步，適合用來公開展示介面。
