@@ -2,7 +2,7 @@
 // Trimmed to the ePassbook login/OTP and snapshot/page APIs used by the
 // connector. Durable callers own pagination and promotion of staged pages.
 const BASE_URL = "https://epassbooksys.tdcc.com.tw/MPSBKV2/rest/";
-const APP_INFO = "tw.com.tdcc.epassbook:3.3.4";
+const APP_INFO = "tw.com.tdcc.epassbook:3.3.8";
 const API_VER = "20250220";
 const DEFAULT_LAST_UPDATE = "19000101000000";
 const BANK_TRANSACTION_PAGE_SIZE = 100;
@@ -77,6 +77,7 @@ export type EPassbookClientOptions = {
   devType: string;
   devModel: string;
   session?: EPassbookSession;
+  fetcher?: typeof fetch;
 };
 
 function bytesToBase64(bytes: Uint8Array): string {
@@ -140,6 +141,7 @@ export class EPassbookClient {
   private readonly devId: string;
   private readonly devType: string;
   private readonly devModel: string;
+  private readonly fetcher: typeof fetch;
 
   constructor(options: EPassbookClientOptions) {
     this.devId = options.devId;
@@ -147,6 +149,7 @@ export class EPassbookClient {
     this.devModel = options.devModel;
     this.tokenId = options.session?.tokenId ?? null;
     this.richUrl = options.session?.richUrl ?? null;
+    this.fetcher = options.fetcher ?? globalThis.fetch.bind(globalThis);
   }
 
   exportSession(): EPassbookSession {
@@ -183,7 +186,7 @@ export class EPassbookClient {
       tokenID: this.tokenId,
     };
 
-    const response = await fetch(`${BASE_URL}${endpoint}`, {
+    const response = await this.fetcher(`${BASE_URL}${endpoint}`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json; charset=utf-8",
@@ -325,7 +328,7 @@ export class EPassbookClient {
       ? this.richUrl.slice(this.richUrl.indexOf("?"))
       : "";
     const url = `${BASE_URL}TR087${qs}&type=${type}`;
-    const response = await fetch(url, {
+    const response = await this.fetcher(url, {
       headers: {
         Referer: "https://digitalprocesssys-epassbook.cdn.hinet.net/",
         "User-Agent": "okhttp/4.9.3",

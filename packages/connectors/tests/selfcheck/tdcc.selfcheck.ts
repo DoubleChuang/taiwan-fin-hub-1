@@ -30,6 +30,8 @@ let mode:
   | "flag_otp"
   | "error_code_otp"
   | "stale_session"
+  | "stale_session_d9993"
+  | "stale_session_d9998"
   | "otp_expired"
   | "pagination_incomplete"
   | "pagination_loop" = "flag_otp";
@@ -81,12 +83,14 @@ function errorResponse(returnCode: string) {
   }
   if (endpoint === "TR001") {
     if (
-      mode === "stale_session" &&
-      body.requestHeader.tokenID === "STALE-TKN"
+      (mode === "stale_session" &&
+        body.requestHeader.tokenID === "STALE-TKN") ||
+      (mode === "stale_session_d9998" &&
+        body.requestHeader.tokenID === "STALE-D9998")
     ) {
       // session is dead; the connector should drop it and retry fresh, at which point
       // the token will no longer be "STALE-TKN" so this branch won't fire again
-      return errorResponse("D0006");
+      return errorResponse(mode === "stale_session_d9998" ? "D9998" : "D0006");
     }
     return respond("0000", {
       lastServerTime: "20240615",
@@ -168,6 +172,20 @@ function errorResponse(returnCode: string) {
     });
   }
   if (endpoint === "tsp/TSP006") {
+    if (
+      mode === "stale_session_d9993" &&
+      body.requestHeader.tokenID === "STALE-D9993"
+    ) {
+      return new Response(
+        JSON.stringify({
+          responseHeader: {
+            returnCode: "D9993",
+            returnMsg: "操作錯誤，請稍後再試。",
+          },
+        }),
+        { status: 200 },
+      );
+    }
     return respond("0000", {
       tspAccountInfos: [
         {
@@ -567,6 +585,44 @@ async function main() {
     JSON.parse(recovered.cursor!).session.tokenId,
     "TKN-1",
     "fresh login should replace the stale token",
+  );
+
+  mode = "stale_session_d9993";
+  const staleCursorD9993 = JSON.stringify({
+    deviceId: "dev-1",
+    devType: "Android:14",
+    devModel: "SM-G991B",
+    session: { tokenId: "STALE-D9993", richUrl: null },
+  });
+  const recoveredD9993 = await connector.sync(configWithOtp, staleCursorD9993);
+  assert.equal(
+    recoveredD9993.records.length,
+    3,
+    "stale session returning D9993 on TSP006 should recover via fresh login",
+  );
+  assert.equal(
+    JSON.parse(recoveredD9993.cursor!).session.tokenId,
+    "TKN-1",
+    "fresh login should replace the stale token after D9993",
+  );
+
+  mode = "stale_session_d9998";
+  const staleCursorD9998 = JSON.stringify({
+    deviceId: "dev-1",
+    devType: "Android:14",
+    devModel: "SM-G991B",
+    session: { tokenId: "STALE-D9998", richUrl: null },
+  });
+  const recoveredD9998 = await connector.sync(configWithOtp, staleCursorD9998);
+  assert.equal(
+    recoveredD9998.records.length,
+    3,
+    "stale session returning D9998 on TR001 should recover via fresh login",
+  );
+  assert.equal(
+    JSON.parse(recoveredD9998.cursor!).session.tokenId,
+    "TKN-1",
+    "fresh login should replace the stale token after D9998",
   );
 
   mode = "pagination_incomplete";
