@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { BrowserRunCapacityError } from "../../../src/connectors/browser";
 import {
   CathayOtpChannelRequiredError,
   CathayOtpInvalidError,
@@ -12,6 +13,12 @@ import {
 } from "../../../src/features/sync/service";
 
 describe("sync error details", () => {
+  it("keeps Browser Run capacity failures as failed syncs", () => {
+    expect(
+      isUserActionError(new BrowserRunCapacityError("daily_quota", 60)),
+    ).toBe(false);
+  });
+
   it("classifies Cathay OTP states as user actions", () => {
     expect(
       isUserActionError(

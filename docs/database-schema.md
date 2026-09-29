@@ -11,7 +11,7 @@
 - Tables：31
 - Explicit indexes：44
 - Other objects：0
-- Migrations：45
+- Migrations：48
 
 ## Tables
 
@@ -1605,8 +1605,8 @@ CREATE TABLE "tdcc_sync_runs" (
     'queued', 'initializing', 'processing', 'promoting',
     'completed', 'failed', 'needs_user_action'
   )),
-
-
+  -- The run retains the encrypted provider state it was initialized with.
+  -- It is never exposed in an API response or log.
   encrypted_config TEXT,
   encrypted_session TEXT,
   session_json TEXT CHECK (session_json IS NULL OR json_valid(session_json)),
@@ -1679,6 +1679,9 @@ Migration 是 schema 演進的 source of truth；若要了解某欄位的變更�
 - [`0045_preference_foreign_keys.sql`](../packages/db/migrations/0045_preference_foreign_keys.sql)
 - [`0046_transaction_self_foreign_keys.sql`](../packages/db/migrations/0046_transaction_self_foreign_keys.sql)
 - [`0047_sync_activity_details.sql`](../packages/db/migrations/0047_sync_activity_details.sql)
+- [`0048_kgibank_sync_job.sql`](../packages/db/migrations/0048_kgibank_sync_job.sql)
+- [`0049_megabank_sync_job.sql`](../packages/db/migrations/0049_megabank_sync_job.sql)
+- [`0050_nextbank_sync_job.sql`](../packages/db/migrations/0050_nextbank_sync_job.sql)
 
 ## 程式碼導覽
 

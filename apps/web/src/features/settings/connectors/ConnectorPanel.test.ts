@@ -164,6 +164,57 @@ function renderFirstbankPanel() {
   return { ...result, api };
 }
 
+function renderNextbankPanel() {
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false, staleTime: 30_000 } },
+  });
+  const api = {
+    get: vi.fn((path: string) => {
+      if (path === "/api/sync-jobs") {
+        return Promise.resolve([
+          syncJob({
+            id: "nextbank:all",
+            connectorId: "nextbank",
+            enabled: true,
+            lastStatus: "failed",
+            lastError:
+              "將來銀行登入資料驗證失敗，請確認設定後重試。請重新取得驗證碼。",
+          }),
+        ]);
+      }
+      if (path === "/api/connectors/nextbank/settings") {
+        return Promise.resolve({
+          connectorId: "nextbank",
+          configured: true,
+          credentialsComplete: true,
+          sessionAvailable: false,
+          updatedAt: "2026-08-26T00:00:00.000Z",
+        });
+      }
+      return Promise.resolve({});
+    }),
+    post: vi.fn(),
+    patch: vi.fn(),
+  } as unknown as ApiClient;
+  const result = render(
+    ConnectorPanel,
+    {
+      props: {
+        api,
+        connectorId: "nextbank",
+        demoMode: false,
+        title: "將來銀行",
+        fields: connectorFields.nextbank as ConnectorField[],
+      },
+    },
+    {
+      wrapper: QueryClientProvider,
+      wrapperProps: { client: queryClient },
+    },
+  );
+  return { ...result, api };
+}
+
 describe("ConnectorPanel", () => {
   it("enables First Bank web sync and keeps both verification paths available", async () => {
     const { api, findByText, getByRole } = renderFirstbankPanel();
@@ -467,4 +518,114 @@ describe("ConnectorPanel", () => {
       vi.useRealTimers();
     }
   });
+});
+
+describe("bank verification feedback", () => {
+  it("shows pending and transport failure immediately when requesting an image", async () => {
+    const view = renderNextbankPanel();
+    let rejectRequest!: (reason: Error) => void;
+    vi.mocked(view.api.post).mockImplementation(
+      () =>
+        new Promise((_resolve, reject) => {
+          rejectRequest = reject;
+        }),
+    );
+    await fireEvent.click(
+      await view.findByRole("button", { name: "改用手動驗證" }),
+    );
+    expect(await view.findByText("正在取得驗證碼圖片…")).toBeInTheDocument();
+    expect(view.getByRole("button", { name: "同步帳戶" })).toBeDisabled();
+    rejectRequest(new Error("將來銀行 API：transport"));
+    expect(await view.findByRole("alert")).toHaveTextContent("無法取得驗證碼");
+    expect(view.getByRole("alert")).toHaveTextContent(
+      "手動驗證無法解決連線問題",
+    );
+    expect(view.api.post).toHaveBeenCalledTimes(1);
+  });
+  it("shows the returned image and requires input before verification", async () => {
+    const view = renderNextbankPanel();
+    vi.mocked(view.api.post).mockResolvedValue({
+      captchaImage: "data:image/png;base64,AQID",
+      expiresAt: new Date(Date.now() + 120000).toISOString(),
+      captchaLength: 5,
+      captchaKind: "alphanumeric",
+    });
+    await fireEvent.click(
+      await view.findByRole("button", { name: "改用手動驗證" }),
+    );
+    expect(
+      await view.findByRole("img", { name: "將來圖形驗證碼" }),
+    ).toBeInTheDocument();
+    expect(view.getByRole("button", { name: "驗證並同步" })).toBeDisabled();
+    await fireEvent.input(view.getByPlaceholderText("5 位英數字驗證碼"), {
+      target: { value: "AB123" },
+    });
+    expect(view.getByRole("button", { name: "驗證並同步" })).toBeEnabled();
+    expect(view.api.post).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("Nextbank CAPTCHA recovery", () => {
+  const rejected = () =>
+    new ApiRequestError("NEXTBANK_CAPTCHA_REQUIRED", "請重新取得圖片。", 400);
+  const image = () => ({
+    captchaImage: "data:image/png;base64,AQID",
+    expiresAt: new Date(Date.now() + 120000).toISOString(),
+    captchaLength: 5,
+    captchaKind: "alphanumeric",
+  });
+  it("gets one new image without retrying login, including a rejected manual answer", async () => {
+    const v = renderNextbankPanel();
+    const post = vi.mocked(v.api.post);
+    post
+      .mockRejectedValueOnce(rejected())
+      .mockResolvedValueOnce(image())
+      .mockRejectedValueOnce(rejected())
+      .mockResolvedValueOnce(image());
+    await fireEvent.click(await v.findByRole("button", { name: "同步帳戶" }));
+    expect(await v.findByRole("img", { name: "將來圖形驗證碼" })).toBeVisible();
+    expect(post.mock.calls.map((c) => c[0])).toEqual([
+      "/api/connectors/nextbank/sync",
+      "/api/connectors/nextbank/captcha",
+    ]);
+    await fireEvent.input(v.getByPlaceholderText("5 位英數字驗證碼"), {
+      target: { value: "AB123" },
+    });
+    await fireEvent.click(v.getByRole("button", { name: "驗證並同步" }));
+    await waitFor(() => expect(post).toHaveBeenCalledTimes(4));
+    expect(await v.findByRole("img", { name: "將來圖形驗證碼" })).toBeVisible();
+    expect(v.getByPlaceholderText("5 位英數字驗證碼")).toHaveValue("");
+    expect(post.mock.calls.map((c) => c[0])).toEqual([
+      "/api/connectors/nextbank/sync",
+      "/api/connectors/nextbank/captcha",
+      "/api/connectors/nextbank/sync",
+      "/api/connectors/nextbank/captcha",
+    ]);
+  });
+  it("stops if the new image cannot be acquired and offers retry", async () => {
+    const v = renderNextbankPanel();
+    vi.mocked(v.api.post)
+      .mockRejectedValueOnce(rejected())
+      .mockRejectedValueOnce(new Error("圖片暫時無法取得"));
+    await fireEvent.click(await v.findByRole("button", { name: "同步帳戶" }));
+    expect(await v.findByRole("alert")).toHaveTextContent("無法取得驗證碼");
+    expect(v.getByRole("button", { name: "重新取得驗證碼" })).toBeEnabled();
+    expect(v.api.post).toHaveBeenCalledTimes(2);
+  });
+  it.each(["credentials", "transport", "session_conflict"])(
+    "does not fetch CAPTCHA for %s",
+    async (kind) => {
+      const v = renderNextbankPanel();
+      vi.mocked(v.api.post).mockRejectedValue(
+        new ApiRequestError(
+          "USER_ACTION_REQUIRED",
+          "將來銀行需要重新驗證：" + kind + "。",
+          400,
+        ),
+      );
+      await fireEvent.click(await v.findByRole("button", { name: "同步帳戶" }));
+      await v.findByRole("alert");
+      expect(v.api.post).toHaveBeenCalledTimes(1);
+    },
+  );
 });

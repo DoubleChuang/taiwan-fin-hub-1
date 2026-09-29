@@ -14,6 +14,7 @@ const CONNECTOR_BANK_CODES: Record<string, string> = {
   taishin: "812",
   ctbc: "822",
   kgibank: "809",
+  megabank: "017",
 };
 
 export interface InstitutionAssetGroup {

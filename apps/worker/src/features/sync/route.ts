@@ -7,10 +7,14 @@ import {
   SkbankProtocolError,
   TdccConnectionError,
   TdccVerificationRequiredError,
+  MegabankConnectionError,
+  MegabankProtocolError,
+  MegabankVerificationRequiredError,
 } from "@taiwan-fin-hub/connectors";
 import { zValidator } from "@hono/zod-validator";
 import { type Context, type Hono } from "hono";
 import { z } from "zod";
+import { BrowserRunCapacityError } from "../../connectors/browser";
 import {
   FirstbankBrowserCapacityError,
   FirstbankConnectionError,
@@ -44,6 +48,7 @@ import { jsonError } from "../../platform/http";
 import { validationHook } from "../../platform/validation";
 import {
   NeedsUserActionError,
+  NextbankCaptchaRequiredError,
   safeErrorMessage,
   SyncAlreadyRunningError,
   SYNC_SCOPE_ALL,
@@ -108,6 +113,13 @@ const firstbankSyncBodySchema = z.object({
 const cathaySyncBodySchema = z.object({
   otp: z.string().min(1).optional(),
   otpChannel: z.enum(["email", "sms"]).optional(),
+});
+
+const megabankSyncBodySchema = z.object({
+  captcha: z
+    .string()
+    .regex(/^\d{5}$/)
+    .optional(),
 });
 
 export const syncRoutes = honoFactory.createApp();
@@ -265,6 +277,8 @@ function registerSyncRoutes(api: Hono<AppBindings>) {
           409,
         );
       }
+      if (error instanceof BrowserRunCapacityError)
+        return browserRunBusyResponse(error);
       if (error instanceof SinopacBrowserCapacityError) {
         const response = jsonError("SINOPAC_BROWSER_BUSY", error.message, 429);
         response.headers.set("Retry-After", String(error.retryAfterSeconds));
@@ -312,6 +326,8 @@ function registerSyncRoutes(api: Hono<AppBindings>) {
           409,
         );
       }
+      if (error instanceof BrowserRunCapacityError)
+        return browserRunBusyResponse(error);
       if (error instanceof TaishinBrowserCapacityError) {
         const response = jsonError("TAISHIN_BROWSER_BUSY", error.message, 429);
         response.headers.set("Retry-After", String(error.retryAfterSeconds));
@@ -363,6 +379,8 @@ function registerSyncRoutes(api: Hono<AppBindings>) {
           409,
         );
       }
+      if (error instanceof BrowserRunCapacityError)
+        return browserRunBusyResponse(error);
       if (error instanceof HncbBrowserCapacityError) {
         const response = jsonError("HNCB_BROWSER_BUSY", error.message, 429);
         response.headers.set("Retry-After", String(error.retryAfterSeconds));
@@ -410,6 +428,8 @@ function registerSyncRoutes(api: Hono<AppBindings>) {
           409,
         );
       }
+      if (error instanceof BrowserRunCapacityError)
+        return browserRunBusyResponse(error);
       if (error instanceof KgibankBrowserCapacityError) {
         const response = jsonError("KGIBANK_BROWSER_BUSY", error.message, 429);
         response.headers.set("Retry-After", String(error.retryAfterSeconds));
@@ -440,6 +460,50 @@ function registerSyncRoutes(api: Hono<AppBindings>) {
           runConnectorSync(
             c.env,
             "kgibank",
+            "manual",
+            SYNC_SCOPE_ALL,
+            overrides,
+          ),
+        ),
+      );
+    },
+  );
+
+  api.post("/connectors/nextbank/captcha", async (c) => {
+    try {
+      return c.json(await prepareConnectorChallenge(c.env, "nextbank"));
+    } catch (error) {
+      if (error instanceof SyncAlreadyRunningError)
+        return jsonError(
+          "SYNC_ALREADY_RUNNING",
+          "將來銀行已有作業進行中。",
+          409,
+        );
+      if (error instanceof NeedsUserActionError)
+        return jsonError("USER_ACTION_REQUIRED", error.message, 400);
+      return jsonError("NEXTBANK_CAPTCHA_FAILED", safeErrorMessage(error), 502);
+    }
+  });
+  api.post(
+    "/connectors/nextbank/sync",
+    zValidator(
+      "json",
+      z.object({
+        captcha: z
+          .string()
+          .regex(/^[A-Za-z0-9]{1,5}$/)
+          .optional(),
+      }),
+      validationHook("INVALID_REQUEST", "將來銀行驗證碼格式不符。"),
+    ),
+    async (c) => {
+      const overrides = c.req.valid("json");
+      return syncRouteResponse(
+        c,
+        withManualSyncLock(c.env, "nextbank", SYNC_SCOPE_ALL, () =>
+          runConnectorSync(
+            c.env,
+            "nextbank",
             "manual",
             SYNC_SCOPE_ALL,
             overrides,
@@ -502,6 +566,8 @@ function registerSyncRoutes(api: Hono<AppBindings>) {
           409,
         );
       }
+      if (error instanceof BrowserRunCapacityError)
+        return browserRunBusyResponse(error);
       if (error instanceof NeedsUserActionError) {
         return jsonError("USER_ACTION_REQUIRED", error.message, 400);
       }
@@ -543,6 +609,57 @@ function registerSyncRoutes(api: Hono<AppBindings>) {
           runConnectorSync(
             c.env,
             "firstbank",
+            "manual",
+            SYNC_SCOPE_ALL,
+            overrides,
+          ),
+        ),
+      );
+    },
+  );
+
+  api.post("/connectors/megabank/captcha", async (c) => {
+    try {
+      return c.json(await prepareConnectorChallenge(c.env, "megabank"));
+    } catch (error) {
+      if (error instanceof SyncAlreadyRunningError) {
+        return jsonError(
+          "SYNC_ALREADY_RUNNING",
+          "兆豐銀行已有驗證或同步作業正在進行。",
+          409,
+        );
+      }
+      if (
+        error instanceof NeedsUserActionError ||
+        error instanceof MegabankVerificationRequiredError
+      ) {
+        return jsonError("USER_ACTION_REQUIRED", error.message, 400);
+      }
+      if (
+        error instanceof MegabankConnectionError ||
+        error instanceof MegabankProtocolError
+      ) {
+        return jsonError("MEGABANK_CONNECTION_FAILED", error.message, 502);
+      }
+      return jsonError("MEGABANK_CAPTCHA_FAILED", safeErrorMessage(error), 502);
+    }
+  });
+
+  api.post(
+    "/connectors/megabank/sync",
+    zValidator(
+      "json",
+      megabankSyncBodySchema,
+      validationHook("INVALID_REQUEST", "兆豐銀行同步選項格式錯誤。"),
+    ),
+    async (c) => {
+      const overrides = c.req.valid("json");
+      return syncRouteResponse(
+        c,
+        withManualSyncLock(c.env, "megabank", SYNC_SCOPE_ALL, () =>
+          runConnectorSync(
+            c.env,
+            "megabank",
             "manual",
             SYNC_SCOPE_ALL,
             overrides,
@@ -597,6 +714,8 @@ async function syncRouteResponse(
     if (error instanceof SyncAlreadyRunningError) {
       return jsonError("SYNC_ALREADY_RUNNING", safeErrorMessage(error), 409);
     }
+    if (error instanceof BrowserRunCapacityError)
+      return browserRunBusyResponse(error);
     if (error instanceof CathayOtpChannelRequiredError) {
       return jsonError(
         "CATHAY_OTP_CHANNEL_REQUIRED",
@@ -637,6 +756,13 @@ async function syncRouteResponse(
     }
     if (error instanceof TdccConnectionError) {
       return jsonError("TDCC_CONNECTION_FAILED", safeErrorMessage(error), 400);
+    }
+    if (error instanceof NextbankCaptchaRequiredError) {
+      return jsonError(
+        "NEXTBANK_CAPTCHA_REQUIRED",
+        safeErrorMessage(error),
+        400,
+      );
     }
     if (error instanceof NeedsUserActionError) {
       return jsonError("USER_ACTION_REQUIRED", safeErrorMessage(error), 400);
@@ -728,6 +854,22 @@ async function syncRouteResponse(
         502,
       );
     }
+    if (
+      error instanceof MegabankConnectionError ||
+      error instanceof MegabankProtocolError
+    ) {
+      return jsonError(
+        "MEGABANK_CONNECTION_FAILED",
+        safeErrorMessage(error),
+        502,
+      );
+    }
     return jsonError("SYNC_FAILED", safeErrorMessage(error), 500);
   }
+}
+
+function browserRunBusyResponse(error: BrowserRunCapacityError) {
+  const response = jsonError("BROWSER_BUSY", safeErrorMessage(error), 429);
+  response.headers.set("Retry-After", String(error.retryAfterSeconds));
+  return response;
 }

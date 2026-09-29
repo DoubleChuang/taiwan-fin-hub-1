@@ -1,4 +1,4 @@
-import { launchBrowserWithRetry } from "./browser.js";
+import { BrowserRunCapacityError, launchBrowserWithRetry } from "./browser.js";
 import puppeteer, {
   type Browser,
   type Frame,
@@ -162,7 +162,7 @@ export function createTaishinConnector(
   recognizeCaptcha?: (
     imageBytes: ArrayBuffer,
     digitCount: number,
-  ) => Promise<string>,
+  ) => Promise<string | null>,
 ) {
   return {
     id: "taishin" as const,
@@ -354,7 +354,7 @@ async function loginWithOcr(
   recognizeCaptcha: (
     imageBytes: ArrayBuffer,
     digitCount: number,
-  ) => Promise<string>,
+  ) => Promise<string | null>,
 ) {
   for (let attempt = 1; attempt <= TAISHIN_AUTO_LOGIN_ATTEMPTS; attempt += 1) {
     try {
@@ -363,6 +363,17 @@ async function loginWithOcr(
         toArrayBuffer(captcha.bytes),
         captcha.digitCount,
       );
+      if (answer === null) {
+        console.warn(
+          JSON.stringify({
+            event: "taishin_ocr_invalid_result",
+            connectorId: "taishin",
+            attempt,
+            digitCount: captcha.digitCount,
+          }),
+        );
+        continue;
+      }
       assertCaptcha(answer, captcha.digitCount);
       await submitLogin(frame, answer, "automatic", page);
       return frame;
@@ -1311,8 +1322,8 @@ async function acquireBrowser(browser: Fetcher, preferredSessionId?: string) {
   }
   const limits = await puppeteer.limits(browser).catch(() => undefined);
   if (limits && limits.allowedBrowserAcquisitions < 1) {
-    throw new TaishinBrowserCapacityError(
-      "Cloudflare 瀏覽器啟動頻率已達上限，請稍後再試。",
+    throw new BrowserRunCapacityError(
+      "acquisition_rate_limit",
       Math.max(
         1,
         Math.ceil(limits.timeUntilNextAllowedBrowserAcquisition / 1000),
@@ -1326,31 +1337,15 @@ async function launchBrowser(
   browser: Fetcher,
   options?: { keep_alive?: number },
 ): Promise<Browser> {
-  try {
-    return await launchBrowserWithRetry(browser, options);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    if (/Browser time limit exceeded for today/i.test(message)) {
-      throw new TaishinBrowserCapacityError(
-        "Cloudflare 瀏覽器今日使用額度已用完。",
-        60,
-      );
-    }
-    if (/code:\s*429|rate limit exceeded/i.test(message)) {
-      throw new TaishinBrowserCapacityError(
-        "Cloudflare 瀏覽器暫時達到使用上限。",
-        20,
-      );
-    }
-    throw error;
-  }
+  return launchBrowserWithRetry(browser, options);
 }
 
 function normalizeTaishinSyncError(error: unknown, stage: TaishinSyncStage) {
   if (
     error instanceof TaishinConnectionError ||
     error instanceof TaishinVerificationRequiredError ||
-    error instanceof TaishinBrowserCapacityError
+    error instanceof TaishinBrowserCapacityError ||
+    error instanceof BrowserRunCapacityError
   ) {
     return error;
   }

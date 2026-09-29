@@ -89,6 +89,28 @@ describe("O-Bank bank display", () => {
   });
 });
 
+describe("Mega Bank display", () => {
+  it("derives bank code 017 and the masked deposit account suffix", () => {
+    const sourceId = "bank:megabank:2345:01234567:TWD";
+    expect(deriveBankMatchKey("megabank", sourceId)).toEqual({
+      bankCode: "017",
+      last4: "2345",
+    });
+    expect(
+      normalizeBankAccountDisplay({
+        connectorId: "megabank",
+        sourceId,
+        institutionName: null,
+        accountName: null,
+        accountType: "savings",
+      }),
+    ).toMatchObject({
+      institutionName: "兆豐銀行",
+      accountName: "末四碼 2345",
+    });
+  });
+});
+
 describe("HNCB bank display", () => {
   it("derives bank code 008 from deposit accounts and ignores credit cards", () => {
     expect(deriveBankMatchKey("hncb", "bank:hncb:777201604933:TWD")).toEqual({

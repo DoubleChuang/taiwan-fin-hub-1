@@ -25,8 +25,10 @@ const mocks = vi.hoisted(() => ({
   startSyncLockHeartbeat: vi.fn(),
   syncCathaybk: vi.fn(),
   syncEsun: vi.fn(),
+  syncMegabank: vi.fn(),
   syncTaishin: vi.fn(),
   syncSkbank: vi.fn(),
+  syncNextbank: vi.fn(),
 }));
 
 vi.mock("../../../src/features/sync/einvoice-sync-service", () => ({
@@ -60,6 +62,9 @@ vi.mock("../../../src/features/sync/service", () => ({
   prepareKgibankCaptchaSession: vi.fn(),
   prepareTaishinCaptchaSession: vi.fn(),
   prepareObankCaptchaSession: vi.fn(),
+  prepareMegabankCaptchaSession: vi.fn(),
+  prepareNextbankCaptchaSession: vi.fn(),
+  syncNextbank: mocks.syncNextbank,
   prepareFirstbankCaptchaSession: vi.fn(),
   safeErrorLogDetails: (error: unknown) => ({
     errorName: error instanceof Error ? error.name : typeof error,
@@ -75,6 +80,7 @@ vi.mock("../../../src/features/sync/service", () => ({
   syncEsun: mocks.syncEsun,
   syncSinopac: vi.fn(),
   syncObank: vi.fn(),
+  syncMegabank: mocks.syncMegabank,
   syncFirstbank: vi.fn(),
   syncHncb: vi.fn(),
   syncKgibank: vi.fn(),
@@ -182,6 +188,16 @@ beforeEach(() => {
     newRecords: {
       invoices: 0,
       bankTransactions: 2,
+      investmentTransactions: 0,
+    },
+  });
+  mocks.syncMegabank.mockResolvedValue({
+    connectorId: "megabank",
+    scope: "all",
+    records: 2,
+    newRecords: {
+      invoices: 0,
+      bankTransactions: 1,
       investmentTransactions: 0,
     },
   });
@@ -300,6 +316,29 @@ describe("scheduled sync rounds", () => {
     );
   });
 
+  it("dispatches a Nextbank schedule without reusing a manual CAPTCHA", async () => {
+    mocks.findOpenDefaultScheduleBatchId.mockResolvedValue(null);
+    mocks.findNextDueSyncJob.mockResolvedValue(syncJob("custom", "nextbank"));
+    mocks.syncNextbank.mockResolvedValueOnce({
+      success: true,
+      connectorId: "nextbank",
+      scope: "all",
+      records: 0,
+      newRecords: {
+        invoices: 0,
+        bankTransactions: 0,
+        investmentTransactions: 0,
+      },
+      cursorUpdated: true,
+    });
+    await runSchedulerTick(env(), scheduledController);
+    expect(mocks.syncNextbank).toHaveBeenCalledWith(
+      expect.anything(),
+      "scheduled",
+      {},
+    );
+  });
+
   it("dispatches a scheduled Cathay job without OTP overrides", async () => {
     const job = syncJob("custom", "cathaybk");
     mocks.findOpenDefaultScheduleBatchId.mockResolvedValue(null);
@@ -308,6 +347,20 @@ describe("scheduled sync rounds", () => {
     await runSchedulerTick(env(), scheduledController);
 
     expect(mocks.syncCathaybk).toHaveBeenCalledWith(
+      expect.anything(),
+      "scheduled",
+      {},
+    );
+  });
+
+  it("dispatches a scheduled Mega Bank job without manual CAPTCHA", async () => {
+    const job = syncJob("custom", "megabank");
+    mocks.findOpenDefaultScheduleBatchId.mockResolvedValue(null);
+    mocks.findNextDueSyncJob.mockResolvedValue(job);
+
+    await runSchedulerTick(env(), scheduledController);
+
+    expect(mocks.syncMegabank).toHaveBeenCalledWith(
       expect.anything(),
       "scheduled",
       {},
