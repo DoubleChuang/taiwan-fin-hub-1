@@ -37,7 +37,9 @@ import {
   CathayVerificationRequiredError,
   createCathaybkConnector,
 } from "../../connectors/cathaybk";
+import { createBrowserBinding } from "../../connectors/browser";
 import { createCtbcFetch } from "../../connectors/ctbc";
+import { createRelayFetch } from "../../connectors/relay-fetch";
 import { createEsunConnector } from "../../connectors/esun";
 import {
   createFirstbankConnector,
@@ -225,7 +227,10 @@ export async function prepareSinopacCaptchaSession(env: Env) {
       ? JSON.parse(settings.public_config)
       : {};
     const config = parseSinopacConfig({ ...stored, ...publicStored });
-    const prepared = await prepareSinopacCaptcha(env.BROWSER, config);
+    const prepared = await prepareSinopacCaptcha(
+      createBrowserBinding(env),
+      config,
+    );
     await updateConnectorEncryptedConfig(
       env.DB,
       connectorId,
@@ -270,7 +275,10 @@ export async function prepareHncbCaptchaSession(env: Env) {
       ? JSON.parse(settings.public_config)
       : {};
     const config = parseHncbConfig({ ...stored, ...publicStored });
-    const prepared = await prepareHncbCaptcha(env.BROWSER, config);
+    const prepared = await prepareHncbCaptcha(
+      createBrowserBinding(env),
+      config,
+    );
     await updateConnectorEncryptedConfig(
       env.DB,
       connectorId,
@@ -318,7 +326,10 @@ export async function prepareKgibankCaptchaSession(env: Env) {
       ? JSON.parse(settings.public_config)
       : {};
     const config = parseKgibankConfig({ ...stored, ...publicStored });
-    const prepared = await prepareKgibankCaptcha(env.BROWSER, config);
+    const prepared = await prepareKgibankCaptcha(
+      createBrowserBinding(env),
+      config,
+    );
     await updateConnectorEncryptedConfig(
       env.DB,
       connectorId,
@@ -366,7 +377,10 @@ export async function prepareTaishinCaptchaSession(env: Env) {
       ? JSON.parse(settings.public_config)
       : {};
     const config = parseTaishinConfig({ ...stored, ...publicStored });
-    const prepared = await prepareTaishinCaptcha(env.BROWSER, config);
+    const prepared = await prepareTaishinCaptcha(
+      createBrowserBinding(env),
+      config,
+    );
     await updateConnectorEncryptedConfig(
       env.DB,
       connectorId,
@@ -413,7 +427,8 @@ export async function prepareObankCaptchaSession(env: Env) {
       ...stored,
       ...parsePublicConnectorConfig(connectorId, settings.public_config),
     });
-    const prepared = await prepareObankCaptcha(config);
+    const relayFetch = createRelayFetch(env);
+    const prepared = await prepareObankCaptcha(config, relayFetch);
     await updateConnectorEncryptedConfig(
       env.DB,
       connectorId,
@@ -460,7 +475,10 @@ export async function prepareFirstbankCaptchaSession(env: Env) {
       ...stored,
       ...parsePublicConnectorConfig(connectorId, settings.public_config),
     });
-    const prepared = await prepareFirstbankCaptcha(env.BROWSER, config);
+    const prepared = await prepareFirstbankCaptcha(
+      createBrowserBinding(env),
+      config,
+    );
     await updateConnectorEncryptedConfig(
       env.DB,
       connectorId,
@@ -504,7 +522,7 @@ export async function syncEsun(
   console.log(
     `[sync] ${connectorId}/${scope}: starting trigger=${trigger} (cursor=${settings.sync_cursor ? "set" : "none"})`,
   );
-  const result = await createEsunConnector(env.BROWSER).sync(
+  const result = await createEsunConnector(createBrowserBinding(env)).sync(
     config,
     settings.sync_cursor ?? undefined,
   );
@@ -620,7 +638,7 @@ export async function syncCathaybk(
     ReturnType<ReturnType<typeof createCathaybkConnector>["sync"]>
   >;
   try {
-    result = await createCathaybkConnector(env.BROWSER).sync(
+    result = await createCathaybkConnector(createBrowserBinding(env)).sync(
       config,
       settings.sync_cursor ?? undefined,
     );
@@ -903,10 +921,11 @@ export async function syncSkbank(
     ReturnType<ReturnType<typeof createSkbankConnector>["sync"]>
   >;
   try {
-    result = await createSkbankConnector().sync(
-      config,
-      settings.sync_cursor ?? undefined,
-    );
+    const relayFetch = createRelayFetch(env);
+    const connector = relayFetch
+      ? createSkbankConnector(relayFetch)
+      : createSkbankConnector();
+    result = await connector.sync(config, settings.sync_cursor ?? undefined);
   } catch (error) {
     if (error instanceof SkbankVerificationRequiredError) {
       throw new NeedsUserActionError(error.message);
@@ -1011,7 +1030,8 @@ export async function syncSinopac(
   >;
   let activeConfig = config;
   try {
-    const connector = createSinopacConnector(env.BROWSER);
+    const browser = createBrowserBinding(env);
+    const connector = createSinopacConnector(browser);
     try {
       result = await connector.sync(
         activeConfig,
@@ -1020,7 +1040,7 @@ export async function syncSinopac(
     } catch (error) {
       if (!(error instanceof SinopacVerificationRequiredError)) throw error;
       const session = await loginSinopacWithOcr(
-        env.BROWSER,
+        browser,
         activeConfig,
         async (imageBytes) =>
           (await recognizeValidateNumber(env.AI, imageBytes, "image/jpeg"))
@@ -1184,8 +1204,9 @@ export async function syncObank(
     ReturnType<ReturnType<typeof createObankConnector>["sync"]>
   >;
   try {
+    const relayFetch = createRelayFetch(env);
     const connector = createObankConnector(
-      globalThis.fetch.bind(globalThis),
+      relayFetch ?? globalThis.fetch.bind(globalThis),
       overrides.captcha
         ? undefined
         : async (imageBytes, contentType) => {
@@ -1334,7 +1355,7 @@ export async function syncFirstbank(
   >;
   try {
     const connector = createFirstbankConnector(
-      env.BROWSER,
+      createBrowserBinding(env),
       overrides.captcha
         ? undefined
         : async (imageBytes: ArrayBuffer, digitCount: number) => {
@@ -1481,7 +1502,7 @@ export async function syncHncb(
   >;
   try {
     result = await createHncbConnector(
-      env.BROWSER,
+      createBrowserBinding(env),
       async (imageBytes, digitCount) =>
         (
           await recognizeNumericCaptcha(
@@ -1637,7 +1658,7 @@ export async function syncKgibank(
   >;
   try {
     result = await createKgibankConnector(
-      env.BROWSER,
+      createBrowserBinding(env),
       async (imageBytes, contentType, digitCount) =>
         (
           await recognizeNumericCaptcha(
@@ -1753,7 +1774,7 @@ export async function syncTaishin(
   >;
   try {
     result = await createTaishinConnector(
-      env.BROWSER,
+      createBrowserBinding(env),
       async (imageBytes, digitCount) =>
         (
           await recognizeNumericCaptcha(

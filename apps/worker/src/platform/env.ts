@@ -22,6 +22,9 @@ export interface Env {
   LOCAL_DEV_MODE?: string | boolean;
   CTBC_API_RELAY_URL?: string;
   CTBC_API_RELAY_TOKEN?: string;
+  RELAY_HTTP_URL?: string;
+  RELAY_HTTP_TOKEN?: string;
+  RELAY_CDP_WS_ENDPOINT?: string;
 }
 
 export type Variables = {

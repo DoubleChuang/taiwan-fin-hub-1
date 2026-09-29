@@ -1,8 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const launch = vi.hoisted(() => vi.fn());
-vi.mock("@cloudflare/puppeteer", () => ({ default: { launch } }));
-import { launchBrowserWithRetry } from "../../src/connectors/browser";
+const connect = vi.hoisted(() => vi.fn());
+vi.mock("@cloudflare/puppeteer", () => ({ default: { launch, connect } }));
+import {
+  createBrowserBinding,
+  launchBrowserWithRetry,
+} from "../../src/connectors/browser";
 
 type Binding = Parameters<typeof launchBrowserWithRetry>[0];
 const acquisitionUrl = "https://fake.host/v1/devtools/browser?keep_alive=60000";
@@ -119,5 +123,47 @@ describe("browser acquisition retry", () => {
     await expect(launchBrowserWithRetry({ fetch })).rejects.toBe(error);
     expect(fetch).toHaveBeenCalledTimes(1);
     expect(launch).toHaveBeenCalledTimes(1);
+  });
+
+  describe("remote CDP relay", () => {
+    it("connects via puppeteer.connect when relayWsEndpoint is configured", async () => {
+      const mockBrowser = { pages: vi.fn().mockResolvedValue([]) };
+      connect.mockResolvedValueOnce(mockBrowser);
+
+      const browserBinding = createBrowserBinding({
+        BROWSER: { fetch: vi.fn() } as unknown as Fetcher,
+        RELAY_CDP_WS_ENDPOINT:
+          "wss://relay.example.com/devtools/browser?token=xyz",
+      });
+
+      const browser = await launchBrowserWithRetry(browserBinding);
+      expect(browser).toBe(mockBrowser);
+      expect(connect).toHaveBeenCalledWith({
+        browserWSEndpoint: "wss://relay.example.com/devtools/browser?token=xyz",
+      });
+      expect(launch).not.toHaveBeenCalled();
+    });
+
+    it("throws a descriptive error when remote CDP connection fails", async () => {
+      connect.mockRejectedValueOnce(new Error("Connection refused"));
+
+      const browserBinding = createBrowserBinding({
+        BROWSER: { fetch: vi.fn() } as unknown as Fetcher,
+        RELAY_CDP_WS_ENDPOINT:
+          "wss://relay.example.com/devtools/browser?token=xyz",
+      });
+
+      await expect(launchBrowserWithRetry(browserBinding)).rejects.toThrow(
+        "無法連線至台灣 Chrome CDP 端點",
+      );
+    });
+
+    it("returns original env.BROWSER when RELAY_CDP_WS_ENDPOINT is absent", () => {
+      const mockBrowserBinding = { fetch: vi.fn() } as unknown as Fetcher;
+      const binding = createBrowserBinding({
+        BROWSER: mockBrowserBinding,
+      });
+      expect(binding).toBe(mockBrowserBinding);
+    });
   });
 });

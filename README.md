@@ -171,7 +171,7 @@ npm run test:backend
 npm run build
 ```
 
-本機 relay、資料庫遷移與既有 D1 部署方式請參考[進階部署與更新](docs/005-deployment.md)。
+本機開發 relay、台灣端雙軌 relay、資料庫遷移與既有 D1 部署方式請參考[進階部署與更新](docs/005-deployment.md)。
 
 ## 技術架構
 

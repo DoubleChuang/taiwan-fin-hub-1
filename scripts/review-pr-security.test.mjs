@@ -358,10 +358,7 @@ test("postPrComment: 在非 dry-run 且指定 --pr 時呼叫 gh pr comment", asy
 
 test("formatAiResponse: 正確處理普通 Chat 回應與 DeepSeek-R1 推理思考過程", () => {
   // 1. 一般 Chat 模型回應
-  assert.equal(
-    formatAiResponse({ content: "無安全漏洞" }),
-    "無安全漏洞",
-  );
+  assert.equal(formatAiResponse({ content: "無安全漏洞" }), "無安全漏洞");
 
   // 2. DeepSeek-R1 reasoning_content 物件
   const r1Response = formatAiResponse({
