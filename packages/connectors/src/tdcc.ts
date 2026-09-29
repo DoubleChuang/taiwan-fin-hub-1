@@ -202,6 +202,8 @@ const SESSION_EXPIRED_CODES = new Set([
   "A0001",
   "A0002",
   "T8000",
+  "D9993",
+  "D9998",
 ]);
 // The stored OTP timed out before this sync ran; it's now dead, so the caller
 // must drop it from config and have the user request a fresh one.
@@ -259,6 +261,7 @@ export type TdccBankEntry = {
 export function createTdccClient(
   config: TdccConfig,
   cursor?: string,
+  fetcher?: typeof fetch,
 ): {
   client: EPassbookClient;
   identity: TdccIdentity;
@@ -280,6 +283,7 @@ export function createTdccClient(
       devType: identity.devType,
       devModel: identity.devModel,
       session: identity.session,
+      fetcher,
     }),
     identity,
     previous,
@@ -378,8 +382,9 @@ async function fetchTdccSnapshot(
 export async function initializeTdccSnapshot(
   config: TdccConfig,
   cursor?: string,
+  fetcher?: typeof fetch,
 ): Promise<TdccSnapshotInitialization> {
-  const state = createTdccClient(config, cursor);
+  const state = createTdccClient(config, cursor, fetcher);
   try {
     await ensureTdccSession(state.client, config);
     const snapshot = await fetchTdccSnapshot(state.client);
@@ -405,6 +410,7 @@ export async function initializeTdccSnapshot(
         devModel: state.identity.devModel,
         session: undefined,
       }),
+      fetcher,
     );
     await ensureTdccSession(fresh.client, {
       ...config,
