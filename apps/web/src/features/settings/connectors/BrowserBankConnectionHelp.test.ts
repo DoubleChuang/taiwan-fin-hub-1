@@ -30,6 +30,9 @@ describe("BrowserBankConnectionHelp", () => {
       "4",
     );
 
+    await fireEvent.input(getByPlaceholderText("4 位數字驗證碼"), {
+      target: { value: "1234" },
+    });
     await fireEvent.click(getByRole("button", { name: "驗證並同步" }));
     expect(onVerify).toHaveBeenCalledOnce();
   });

@@ -1,4 +1,4 @@
-import { launchBrowserWithRetry } from "./browser.js";
+import { BrowserRunCapacityError, launchBrowserWithRetry } from "./browser.js";
 import puppeteer, {
   type Browser,
   type CDPSession,
@@ -2178,7 +2178,14 @@ async function navigateToReadyFrame(
   path: string,
 ) {
   const target = nestedContentFrame(page, frame);
-  if (framePathname(target) !== path) await navigateFrame(target, url);
+  if (framePathname(target) !== path) {
+    try {
+      await navigateFrame(target, url);
+    } catch (error) {
+      if (!/net::ERR_ABORTED/i.test(errorMessage(error))) throw error;
+      logFirstbankStage("overview-navigation-aborted", { path });
+    }
+  }
   return waitForReadyFrameByPath(page, path, target);
 }
 
@@ -2563,8 +2570,8 @@ async function acquireBrowser(
 
   const limits = await puppeteer.limits(browserFetcher).catch(() => undefined);
   if (limits && limits.allowedBrowserAcquisitions < 1) {
-    throw new FirstbankBrowserCapacityError(
-      "Cloudflare 瀏覽器啟動頻率已達上限，請稍後再取得驗證碼。",
+    throw new BrowserRunCapacityError(
+      "acquisition_rate_limit",
       Math.max(
         1,
         Math.ceil(limits.timeUntilNextAllowedBrowserAcquisition / 1000),
@@ -2590,25 +2597,9 @@ async function waitForSessionRelease(
 }
 
 async function launchBrowser(browserFetcher: Fetcher): Promise<Browser> {
-  try {
-    return await launchBrowserWithRetry(browserFetcher, {
-      keep_alive: CAPTCHA_KEEP_ALIVE_MS,
-    });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    if (/Browser time limit exceeded for today/i.test(message)) {
-      throw new FirstbankBrowserCapacityError(
-        "Cloudflare 瀏覽器今日使用額度已用完，請於額度重置後再試。",
-        60,
-      );
-    }
-    if (/429|rate limit|capacity|too many/i.test(message)) {
-      throw new FirstbankBrowserCapacityError(
-        "Cloudflare 瀏覽器暫時達到使用上限，請稍後重試。",
-      );
-    }
-    throw error;
-  }
+  return launchBrowserWithRetry(browserFetcher, {
+    keep_alive: CAPTCHA_KEEP_ALIVE_MS,
+  });
 }
 
 async function closeFirstbankBrowser(browser: Browser) {
@@ -2852,6 +2843,7 @@ function mapFirstbankError(error: unknown): Error {
   if (
     error instanceof FirstbankVerificationRequiredError ||
     error instanceof FirstbankBrowserCapacityError ||
+    error instanceof BrowserRunCapacityError ||
     error instanceof FirstbankConnectionError
   ) {
     return error;

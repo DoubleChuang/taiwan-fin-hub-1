@@ -19,15 +19,19 @@ import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   persistStagedSyncWrite,
+  promoteStagedSyncWrite,
+  stageSyncWriteRecords,
   type SyncWriteRecord,
 } from "../../../src/features/sync/persistence";
 import {
+  connectorStateStatement,
   linkCanonicalBankAccountsStatement,
   reconcileEsunLifecycleShadowStatements,
   reconcileEsunSingleCardSummaryAccountStatements,
   reconcileHncbLegacyTransactionStatements,
   reconcileHncbSingleCardSummaryAccountStatements,
   reconcileSinopacLegacyTransactionStatements,
+  updateConnectorEncryptedConfigIfCurrent,
 } from "../../../src/features/sync/repository";
 
 /** This Node sqlite bind API only accepts anonymous `?`; expand D1 `?1` placeholders. */
@@ -245,6 +249,180 @@ function creditCardBillRecord(
 }
 
 describe("staged sync persistence", () => {
+  it("does not promote Mega Bank records after credentials change between staging and promotion", async () => {
+    const db = createDb();
+    const d1 = db as unknown as D1Database;
+    db.database
+      .prepare(
+        `INSERT INTO connector_settings
+         (id, connector_id, encrypted_config, sync_cursor, created_at, updated_at)
+         VALUES ('megabank-settings', 'megabank', 'old-config', 'old-cursor', '2026-09-27', '2026-09-27')`,
+      )
+      .run();
+    const record = bankAccountRecord(99);
+    record.recordKey = "megabank:account-99";
+    Object.assign(record.payload, {
+      id: "megabank:account-99",
+      connector_id: "megabank",
+      source_id: "bank:megabank:0099",
+      bank_code: "017",
+    });
+    const transaction = bankTransactionRecord("race", "posted", {
+      authorizedAt: "2026-09-20",
+      postedDate: "2026-09-20",
+    });
+    transaction.recordKey = "megabank:account-99:race";
+    Object.assign(transaction.payload, {
+      id: "megabank:account-99:race",
+      connector_id: "megabank",
+      account_id: "megabank:account-99",
+      source_id: "megabank:deposit:tx:race",
+    });
+    const runId = "megabank-stale-settings";
+    await stageSyncWriteRecords(d1, runId, [record, transaction]);
+    db.database
+      .prepare(
+        `UPDATE connector_settings
+         SET encrypted_config = 'new-config', sync_cursor = NULL
+         WHERE connector_id = 'megabank'`,
+      )
+      .run();
+
+    const guard = {
+      connectorId: "megabank" as const,
+      encryptedConfig: "old-config",
+    };
+    await promoteStagedSyncWrite(d1, {
+      runId,
+      entityTypes: ["bank_account", "bank_transaction"],
+      settingsGuard: guard,
+      afterPromoteStatements: [linkCanonicalBankAccountsStatement(d1, guard)],
+      finalizeStatements: [
+        connectorStateStatement(
+          d1,
+          "megabank",
+          "old-cleaned-config",
+          null,
+          "old-synced-cursor",
+          "2026-09-28",
+          "old-config",
+        ),
+      ],
+    });
+    expect(
+      db.database
+        .prepare(
+          `SELECT COUNT(*) AS count FROM bank_accounts WHERE connector_id = 'megabank'`,
+        )
+        .get(),
+    ).toEqual({ count: 0 });
+    expect(
+      db.database
+        .prepare(
+          `SELECT COUNT(*) AS count FROM bank_transactions WHERE connector_id = 'megabank'`,
+        )
+        .get(),
+    ).toEqual({ count: 0 });
+    expect(
+      db.database
+        .prepare(
+          "SELECT COUNT(*) AS count FROM sync_write_staging WHERE run_id = ?",
+        )
+        .get(runId),
+    ).toEqual({ count: 0 });
+    expect(
+      db.database
+        .prepare(
+          `SELECT encrypted_config, sync_cursor FROM connector_settings
+           WHERE connector_id = 'megabank'`,
+        )
+        .get(),
+    ).toEqual({ encrypted_config: "new-config", sync_cursor: null });
+
+    const newRecords = await persistStagedSyncWrite(d1, {
+      records: [record, transaction],
+      settingsGuard: { connectorId: "megabank", encryptedConfig: "new-config" },
+    });
+    expect(newRecords.bankTransactions).toBe(1);
+    expect(
+      db.database
+        .prepare(
+          `SELECT COUNT(*) AS count FROM bank_accounts WHERE connector_id = 'megabank'`,
+        )
+        .get(),
+    ).toEqual({ count: 1 });
+  });
+
+  it("does not restore old Mega Bank credentials or cursor after a settings change", async () => {
+    const db = createDb();
+    db.database
+      .prepare(
+        `INSERT INTO connector_settings
+         (id, connector_id, encrypted_config, sync_cursor, created_at, updated_at)
+         VALUES ('megabank-settings', 'megabank', 'old-config', 'old-cursor', '2026-09-27', '2026-09-27')`,
+      )
+      .run();
+    const d1 = db as unknown as D1Database;
+    expect(
+      await updateConnectorEncryptedConfigIfCurrent(
+        d1,
+        "megabank",
+        "old-config",
+        "old-pending-session",
+      ),
+    ).toBe(true);
+
+    db.database
+      .prepare(
+        `UPDATE connector_settings
+         SET encrypted_config = 'new-config', sync_cursor = NULL
+         WHERE connector_id = 'megabank'`,
+      )
+      .run();
+    expect(
+      await updateConnectorEncryptedConfigIfCurrent(
+        d1,
+        "megabank",
+        "old-pending-session",
+        "old-cleaned-config",
+      ),
+    ).toBe(false);
+    expect(
+      (
+        await connectorStateStatement(
+          d1,
+          "megabank",
+          "old-cleaned-config",
+          null,
+          "old-synced-cursor",
+          "2026-09-28",
+          "old-pending-session",
+        ).run()
+      ).meta.changes,
+    ).toBe(0);
+    expect(
+      db.database
+        .prepare(
+          `SELECT encrypted_config, sync_cursor FROM connector_settings
+           WHERE connector_id = 'megabank'`,
+        )
+        .get(),
+    ).toEqual({ encrypted_config: "new-config", sync_cursor: null });
+    expect(
+      (
+        await connectorStateStatement(
+          d1,
+          "megabank",
+          "new-cleaned-config",
+          null,
+          "new-synced-cursor",
+          "2026-09-28",
+          "new-config",
+        ).run()
+      ).meta.changes,
+    ).toBe(1);
+  });
+
   it("seeds a disabled CTBC all-scope sync job", () => {
     const db = createDb();
 
@@ -372,6 +550,35 @@ describe("staged sync persistence", () => {
         )
         .get(),
     ).toEqual({ canonicalAccountId: "skbank-direct" });
+  });
+
+  it("links TDCC bank 017 records to the direct Mega Bank account", async () => {
+    const db = createDb();
+    db.database.exec(`
+      INSERT INTO bank_accounts
+        (id, connector_id, source_id, institution_name, account_name, account_type,
+         currency, bank_code, account_last4, raw_payload, created_at, updated_at)
+      VALUES
+        ('megabank-direct', 'megabank', 'bank:megabank:2345:hash:TWD', '兆豐銀行',
+         '末四碼 2345', 'savings', 'TWD', '017', '2345', '{}', '2026-09-25', '2026-09-25'),
+        ('tdcc-settlement', 'tdcc', 'settlement:017:0000000000012345', '兆豐銀行',
+         '交割帳戶', 'settlement_cash', 'TWD', '017', '2345', '{}', '2026-09-25', '2026-09-25');
+    `);
+
+    await db.batch([
+      linkCanonicalBankAccountsStatement(
+        db as unknown as D1Database,
+      ) as unknown as D1PreparedStatement,
+    ]);
+
+    expect(
+      db.database
+        .prepare(
+          `SELECT canonical_account_id AS canonicalAccountId
+           FROM bank_accounts WHERE id = 'tdcc-settlement'`,
+        )
+        .get(),
+    ).toEqual({ canonicalAccountId: "megabank-direct" });
   });
 
   it("preserves E.SUN lifecycle shadows when multiple old rows match one transaction", async () => {

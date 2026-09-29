@@ -8,6 +8,21 @@ import {
 } from "../../../src/features/sync/connector-state";
 
 describe("connector state boundaries", () => {
+  it("keeps Nextbank challenge and token values out of the sync cursor", () => {
+    const split = splitConnectorCursorState(
+      "nextbank",
+      JSON.stringify({
+        syncedAt: "2026-09-27",
+        captchaUuid: "synthetic-challenge",
+        captchaExpiresAt: 1000,
+      }),
+    );
+    expect(JSON.parse(split.safeCursor)).toEqual({ syncedAt: "2026-09-27" });
+    expect(split.secretState).toEqual({
+      captchaUuid: "synthetic-challenge",
+      captchaExpiresAt: 1000,
+    });
+  });
   it("keeps retired public preferences out of encrypted config", () => {
     expect(
       sensitiveConnectorConfig("einvoice", {
@@ -119,6 +134,32 @@ describe("connector state boundaries", () => {
         captcha: "1234",
       },
     });
+  });
+
+  it("keeps Mega Bank CAPTCHA sessions out of the cursor", () => {
+    expect(
+      splitConnectorCursorState(
+        "megabank",
+        JSON.stringify({
+          pendingSession: "synthetic-token",
+          pendingSessionExpiresAt: "2026-09-25T08:02:00.000Z",
+          captcha: "12345",
+          syncedAt: "2026-09-25T08:01:00.000Z",
+        }),
+      ),
+    ).toEqual({
+      safeCursor: JSON.stringify({ syncedAt: "2026-09-25T08:01:00.000Z" }),
+      secretState: {
+        pendingSession: "synthetic-token",
+        pendingSessionExpiresAt: "2026-09-25T08:02:00.000Z",
+        captcha: "12345",
+      },
+    });
+    expect(
+      serializePublicConnectorConfig("megabank", {
+        pendingSession: "synthetic-token",
+      }),
+    ).toBeNull();
   });
 
   it("removes Cathay trusted browser state from the cursor", () => {

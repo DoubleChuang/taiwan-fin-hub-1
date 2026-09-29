@@ -1,4 +1,4 @@
-import { launchBrowserWithRetry } from "./browser.js";
+import { BrowserRunCapacityError, launchBrowserWithRetry } from "./browser.js";
 import puppeteer, {
   type Browser,
   type Frame,
@@ -838,33 +838,17 @@ async function acquireBrowser(
 
   const limits = await puppeteer.limits(browserFetcher).catch(() => undefined);
   if (limits && limits.allowedBrowserAcquisitions < 1) {
-    throw new KgibankBrowserCapacityError(
-      "Cloudflare 瀏覽器啟動頻率已達上限，請稍後再取得驗證碼。",
+    throw new BrowserRunCapacityError(
+      "acquisition_rate_limit",
       Math.max(
         1,
         Math.ceil(limits.timeUntilNextAllowedBrowserAcquisition / 1000),
       ),
     );
   }
-  try {
-    return await launchBrowserWithRetry(browserFetcher, {
-      keep_alive: CAPTCHA_KEEP_ALIVE_MS,
-    });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    if (/Browser time limit exceeded for today/i.test(message)) {
-      throw new KgibankBrowserCapacityError(
-        "Cloudflare 瀏覽器今日使用額度已用完，請於額度重置後再試。",
-        60,
-      );
-    }
-    if (/429|rate limit|capacity/i.test(message)) {
-      throw new KgibankBrowserCapacityError(
-        "Cloudflare 瀏覽器暫時達到使用上限，請稍後重試。",
-      );
-    }
-    throw error;
-  }
+  return launchBrowserWithRetry(browserFetcher, {
+    keep_alive: CAPTCHA_KEEP_ALIVE_MS,
+  });
 }
 
 async function configurePage(page: Page) {
@@ -921,6 +905,7 @@ function mapKgibankError(error: unknown): Error {
   if (
     error instanceof KgibankVerificationRequiredError ||
     error instanceof KgibankBrowserCapacityError ||
+    error instanceof BrowserRunCapacityError ||
     error instanceof KgibankConnectionError
   ) {
     return error;

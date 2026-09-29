@@ -17,6 +17,7 @@ const jpegMock = vi.hoisted(() => ({
 vi.mock("@cloudflare/puppeteer", () => ({ default: puppeteerMock }));
 vi.mock("jpeg-js", () => jpegMock);
 
+import { BrowserRunCapacityError } from "../../src/connectors/browser";
 import {
   createSinopacConnector,
   loginSinopacWithOcr,
@@ -101,6 +102,15 @@ beforeEach(() => {
 });
 
 describe("sinopac browser session lifecycle", () => {
+  it("propagates Browser Run launch limits", async () => {
+    puppeteerMock.launch.mockRejectedValueOnce(
+      new Error("Unable to create new browser: code: 429"),
+    );
+    await expect(
+      prepareSinopacCaptcha({} as Fetcher, credentials),
+    ).rejects.toBeInstanceOf(BrowserRunCapacityError);
+  });
+
   it("requires one-time verification before acquiring a browser when no bank cookies exist", async () => {
     await expect(
       createSinopacConnector({} as Fetcher).sync(credentials),
@@ -192,7 +202,8 @@ describe("sinopac browser session lifecycle", () => {
     await expect(
       prepareSinopacCaptcha({} as Fetcher, credentials),
     ).rejects.toMatchObject({
-      name: "SinopacBrowserCapacityError",
+      name: "BrowserRunCapacityError",
+      kind: "acquisition_rate_limit",
       retryAfterSeconds: 20,
     });
     expect(puppeteerMock.launch).not.toHaveBeenCalled();

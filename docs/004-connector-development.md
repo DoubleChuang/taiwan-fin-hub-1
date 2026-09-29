@@ -12,9 +12,9 @@ Connector 採三層 registry：
 | Config registry | `packages/connectors/src/index.ts` 的 `connectorConfigSchemas`            | Zod schema 與設定解析                                 |
 | Worker runtime  | `apps/worker/src/features/sync/registry.ts` 的 `connectorRuntimeRegistry` | 手動／排程同步與互動式 challenge handler              |
 
-三個 registry 都必須以 `Record<ConnectorId, ...>` 宣告。新增 `ConnectorId` 後，TypeScript 應立即指出尚未補齊的 config 或 runtime。
+`ConnectorId` 由 `connectorCatalog` 的 key 推得；catalog 每筆 `id` 必須與 key 相同。Config 與 Worker runtime registry 都必須以 `Record<ConnectorId, ...>` 宣告，新增 catalog 項目後，TypeScript 應立即指出尚未補齊的 config 或 runtime。
 
-前端資料來源名稱由 `connectorCatalog` 產生；表單欄位 key 必須符合 catalog 宣告的 credential 或 public field，不得使用未受型別限制的任意字串。
+前端資料來源名稱與顯示順序由 `connectorCatalog` 產生；表單欄位 key 必須符合 catalog 宣告的 credential 或 public field，不得使用未受型別限制的任意字串。新增 connector 應加在 catalog 末尾。
 
 ## 連接模式
 
@@ -23,7 +23,7 @@ Connector 採三層 registry：
 | Mode                      | 適用情境                                                 | 現有範例                         |
 | ------------------------- | -------------------------------------------------------- | -------------------------------- |
 | `api_credentials`         | 帳密登入外部 API，可自行更新 token                       | 電子發票、中信、新光             |
-| `api_captcha_session`     | App API 登入含 CAPTCHA，challenge 僅短暫加密保存         | 王道銀行                         |
+| `api_captcha_session`     | App API 登入含 CAPTCHA，challenge 僅短暫加密保存         | 王道、兆豐銀行                   |
 | `api_device_otp`          | API 登入，首次裝置需要 OTP                               | 集保 e 存摺                      |
 | `browser_per_sync`        | 每次同步都必須以 Browser 登入與擷取                      | 國泰世華                         |
 | `browser_session`         | Browser 只負責登入，後續使用可復用的 HTTP session        | 玉山                             |
@@ -86,10 +86,18 @@ Connector 不得依賴 Hono、D1、Worker `Env`，也不得直接寫入資料庫
 `apps/worker/src/connectors/browser.ts` 的 `launchBrowserWithRetry`，不得直接呼叫
 `puppeteer.launch`。共用 adapter 在 binding `fetch` 層僅針對建立瀏覽器的
 `POST /v1/devtools/browser` 請求依 HTTP status `503` 判斷重試，不比對錯誤文案。
-預設等待 2 秒、5 秒後重試，
-最多嘗試 3 次；耗盡後保留原始錯誤，交由既有同步失敗流程處理。結構化 log
-只記錄狀態碼、嘗試次數與重試延遲。`429` 額度／限流錯誤維持既有處理，
-session 重連、瀏覽器建立後的操作與銀行登入不在此重試範圍內。
+預設等待 2 秒、5 秒後重試，最多嘗試 3 次；`503` 耗盡後保留原始錯誤。
+結構化 log 只記錄狀態碼、嘗試次數與重試延遲。建立瀏覽器時遇到 Browser Run
+每日額度或限流，`classifyBrowserRunCapacityError` 會轉成共用的
+`BrowserRunCapacityError`；不相關錯誤原樣傳遞。每日額度依 Cloudflare 的 UTC
+隔日重置，使用者訊息說明「每日台灣時間早上 8 點重置」，`Retry-After` 為距離
+下一次重置的秒數。五家原有的 `puppeteer.limits` 啟動頻率預先檢查也使用共用錯誤，
+並保留當下取得的等待秒數。
+
+手動同步與驗證碼 route 對共用錯誤回應 `429 BROWSER_BUSY`；同步紀錄維持
+`failed`，排程在下一輪照常重試。銀行專屬 capacity error 只處理驗證碼作業或
+session 忙碌，原有專屬 API 錯誤碼仍供這些情境使用。session 重連、瀏覽器建立後
+的操作與銀行登入不在共用辨識及建立重試範圍內。
 
 ## 正規化資料契約
 
@@ -137,6 +145,7 @@ session 重連、瀏覽器建立後的操作與銀行登入不在此重試範圍
 2. 在 `packages/connectors` 建立 config、client、parser 與 config registry entry。
 3. 需要 binding 時，在 `apps/worker/src/connectors` 建立 adapter。
 4. 在 sync service 實作 normalized result、record mapping 與 staged persistence。
+   若來源提供直接存款帳戶，確認 `DIRECT_DEPOSIT_CONNECTOR_IDS` 是否需加入，以連結集保交割帳戶。
 5. 在 Worker runtime registry 註冊 sync／challenge handler。
 6. 在前端新增受 `ConnectorFormFieldKey` 約束的表單欄位與必要 challenge UI。
 7. 新增 sync job migration。
@@ -212,6 +221,13 @@ Migration `0043_merge_legacy_invoice_duplicates.sql` 以相同發票號碼整併
 要再送一次「確定登入」。信用卡即時消費與近一年明細來自
 `iesc.esunbank.com` 的 `realTime/getDetailResult` 與
 `creditLastYear/getFilterResult`，存款明細要先呼叫任務 `home/init` 再查詢。
+並非每位使用者都有信用卡或外幣帳戶：同步先呼叫 IESC `common/isCardholder`，
+只有成功回傳 `rtnCode: "S"` 且 `credit: false` 時才略過全部信用卡請求，也不建立
+信用卡帳戶；請求失敗或其他回應都維持原本的信用卡流程。外幣存款查詢回傳 `S001`
+且說明為「查無外幣帳號，或您尚未開立外幣帳戶」時視為沒有外幣帳戶；`S001` 也用於
+其他提示頁，說明不符時仍使同步失敗。瀏覽器登入後，刷卡明細頁要同時具備 IESC
+`accessToken` 與「未入帳」選單或「尚未持有本行信用卡」提示才算就緒，避免在頁面
+自己的初始化請求輪替 token 時送出額外請求。
 信用卡 `getCardOverview` 的 `creditCardFeePaid` 為 `true` 時，將本期帳單標為已繳；
 否則繳款狀態維持未知。
 即時授權與之後入帳必須沿用原本的消費日期、商店、金額與卡片組成 `sourceId`，
@@ -260,6 +276,7 @@ Migration `0043_merge_legacy_invoice_duplicates.sql` 以相同發票號碼整併
 ### 台新銀行
 
 - 台新登入後若出現「訊息通知／每三個月變更一次密碼」彈窗，必須點「關閉」後再抓資料。不得點「前往修改」或「3個月後提醒」，也不得停在彈窗卻因為 session API 仍可用而回報同步成功。
+- 自動辨識驗證碼的結果若不符合頁面要求的數字位數，不送出登入；重新載入頁面取得新驗證碼，沿用最多三次的自動登入嘗試。仍無法辨識時改由使用者人工驗證，日誌不得記錄驗證碼或圖片。
 
 ### 中國信託銀行
 
@@ -338,3 +355,20 @@ Migration `0043_merge_legacy_invoice_duplicates.sql` 以相同發票號碼整併
 - 凱基同一身分證只允許單一登入。遇到 `connect/token` 回應 `isSSOExsit` 時，手動與排程同步都比照使用者操作確認「繼續登入」，會登出行動銀行 App；同步結束（成功或失敗）都呼叫 `Account/AccountLogout/Logout` 釋放登入。
 - 凱基連續三次密碼錯誤會停權。`connect/token` 被拒絕或頁面顯示密碼／代號錯誤時一律標記 `needs_user_action` 並清除驗證狀態，不得重試；只有尚未送出帳密且頁面明確顯示驗證碼錯誤時才視為驗證碼錯誤。
 - 凱基資料由登入後頁面自身 API 請求的授權 header（`authorization`、`ocp-apim-subscription-key`、`x-c-*`）於頁面內呼叫 `TwdDemandDepositDetail/AcctQuery` 與 `TxnQuery`；交易 `sourceId` 以帳號、秒精度交易時間、金額與交易後餘額雜湊，不依賴 `recNo`。
+
+### 兆豐銀行
+
+- 使用 App 2.5.19 的 MobileFirst API：OAuth client credentials、`/main/init`、App 初始化、五位數字驗證碼、E2EE RSA／TripleDES 帳密登入。一般登入不要求快速登入或裝置綁定。本機已完成一次實際同步；Cloudflare Workers 線上執行仍需驗證。
+- 人工驗證碼的待登入 session 只保存於 `encrypted_config`，兩分鐘到期，成功或失敗後清除；排程同步使用 Workers AI 辨識。`sync_cursor` 只含同步時間。
+- 登入後無論同步成功或失敗，都依 App 流程呼叫 `/fco/fco02011/logout` 釋放銀行工作階段；登出失敗不覆蓋同步結果或原始錯誤。
+- 本機曾觀察到網銀登入期間同步回 `SYS014`，登出網銀後同步成功；這支持工作階段衝突的推論，但尚無 `SYS014` 的官方定義。此代碼會提示先登出網銀再試，連接器不自動接管其他登入。
+- 驗證碼準備及同步後的設定寫入會比對當初讀取的加密設定；promotion batch 也先檢查同一版本，期間若憑證已更新，不寫入舊帳務、舊憑證或同步游標。
+- 兆豐同步工作建立時停用；首次成功同步後會比照永豐、台新與王道自動啟用。若使用者之後手動停用，再次手動同步不會重新啟用。
+- 存款清單取 `/fco/fco10001/home`；臺幣交易按帳戶查 `/fao/fao01001/query`，最多回溯三個月並處理 `tsqName` 分頁。外幣帳戶與餘額仍會同步，外幣交易查詢尚未完成協定驗證。
+- 信用卡總覽與餘額取 `/fco/fco10007/home`，近三期帳單取 `/fao/fao01009/home`，消費取 `/fao/fao01010/home` 與 `query`。本機真實登入已確認這些端點及總覽、帳單、消費查詢的外層欄位；探測只記錄欄位型別與筆數，未保存金額或交易內容。
+- 總覽 `creditCardBillInfoList` 依 `ACCT_TYPE` 與 `CURR_CODE` 區分；`ACCT_MON=999912` 是未出帳，其餘僅取各組最新一期計算目前應繳，不累加歷史帳單。消費的 `acctMon=999912` 表示未入帳；本機同步的信用卡消費金額已與 App 顯示核對一致，其他內層欄位尚待逐一核對。
+- 帳戶與卡號只用於請求和雜湊識別；持久化的 `raw` 只保留末四碼。任何關鍵回應無法解析時整次同步失敗，避免部分更新。
+
+## 將來銀行
+
+使用銀行 Web API 與人工 CAPTCHA／自動辨識，單次帳密登入、查詢後登出，不接管其他工作階段。主帳戶查詢最近三個月，活存口袋讀取所有分頁後依日期篩選；定存口袋目前僅合成驗證，基金與美股未接入。排程預設停用，排程登入尚未真實驗收。設定 CAS 與原子寫入 guard 防止查詢期間變更帳密後仍寫入舊結果。

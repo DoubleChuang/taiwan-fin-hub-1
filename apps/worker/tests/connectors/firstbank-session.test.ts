@@ -9,6 +9,7 @@ const puppeteerMock = vi.hoisted(() => ({
 
 vi.mock("@cloudflare/puppeteer", () => ({ default: puppeteerMock }));
 
+import { BrowserRunCapacityError } from "../../src/connectors/browser";
 import {
   createFirstbankConnector,
   FIRSTBANK_SESSION_OCCUPIED_MESSAGE,
@@ -774,6 +775,15 @@ afterEach(() => {
 });
 
 describe("第一銀行 browser session lifecycle", () => {
+  it("preserves a shared Browser Run launch error through connector normalization", async () => {
+    puppeteerMock.launch.mockRejectedValueOnce(
+      new Error("Unable to create new browser: code: 429"),
+    );
+    await expect(
+      createFirstbankConnector({} as Fetcher).sync(credentials),
+    ).rejects.toBeInstanceOf(BrowserRunCapacityError);
+  });
+
   it("captures CAPTCHA, stores session id, and disconnects the pending browser", async () => {
     const page = makePage();
     const browser = makeBrowser(page);
@@ -1834,6 +1844,84 @@ describe("第一銀行交易明細 010103 擷取", () => {
     expect(staleFrame.click).not.toHaveBeenCalled();
     expect(replacementFrame.click).toHaveBeenCalledTimes(1);
     expect(replacementFrame.click).toHaveBeenCalledWith("#btnOpen a");
+  });
+
+  it("存款總覽導覽回報 ERR_ABORTED 但 frame 已就緒時繼續同步", async () => {
+    const page = makePage({ authenticated: true });
+    page.frame.goto.mockImplementation(async (url: string) => {
+      page.frame.setUrl(url);
+      if (url === ACCOUNT_OVERVIEW_URL) {
+        throw new Error(`net::ERR_ABORTED at ${url}`);
+      }
+    });
+    detachQueryFrameAfterSearch(
+      page,
+      [makeEmptyLiveFrame()],
+      transactionTables,
+    );
+    puppeteerMock.launch.mockResolvedValue(makeBrowser(page));
+    const recognize = vi.fn();
+
+    const result = await createFirstbankConnector(
+      {} as Fetcher,
+      recognize,
+    ).sync({
+      ...credentials,
+      sessionCookies: JSON.stringify([
+        {
+          name: "SESSION",
+          value: "encrypted-at-rest",
+          domain: "ibank.firstbank.com.tw",
+        },
+      ]),
+    });
+
+    expect(result.bankAccounts).toHaveLength(1);
+    expect(recognize).not.toHaveBeenCalled();
+    expect(
+      page.frame.goto.mock.calls.filter(
+        ([url]) => url === ACCOUNT_OVERVIEW_URL,
+      ),
+    ).toHaveLength(1);
+    expect(
+      page.frame.click.mock.calls.filter(
+        ([selector]) => selector === "#btnOpen a",
+      ),
+    ).toHaveLength(1);
+  });
+
+  it("存款總覽導覽回報 ERR_ABORTED 且 frame 未載入時仍回報失敗", async () => {
+    vi.useFakeTimers();
+    const page = makePage({ authenticated: true });
+    page.frame.goto.mockImplementation(async (url: string) => {
+      if (url === ACCOUNT_OVERVIEW_URL) {
+        throw new Error(`net::ERR_ABORTED at ${url}`);
+      }
+      page.frame.setUrl(url);
+    });
+    puppeteerMock.launch.mockResolvedValue(makeBrowser(page));
+
+    const pending = createFirstbankConnector({} as Fetcher).sync({
+      ...credentials,
+      sessionCookies: JSON.stringify([
+        {
+          name: "SESSION",
+          value: "encrypted-at-rest",
+          domain: "ibank.firstbank.com.tw",
+        },
+      ]),
+    });
+    const expectation =
+      expect(pending).rejects.toThrow("第一銀行存款總覽頁面尚未載入完成。");
+    await vi.advanceTimersByTimeAsync(10_250);
+    await expectation;
+
+    expect(page.frame.click).not.toHaveBeenCalled();
+    expect(
+      page.frame.goto.mock.calls.filter(
+        ([url]) => url === ACCOUNT_OVERVIEW_URL,
+      ),
+    ).toHaveLength(1);
   });
 
   it("英文 placeholder value 0 不會被選成查詢帳號", async () => {

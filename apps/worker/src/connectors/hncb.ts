@@ -1,4 +1,4 @@
-import { launchBrowserWithRetry } from "./browser.js";
+import { BrowserRunCapacityError, launchBrowserWithRetry } from "./browser.js";
 import puppeteer, {
   type Browser,
   type Dialog,
@@ -996,8 +996,8 @@ async function acquireBrowser(
 
   const limits = await puppeteer.limits(browserFetcher).catch(() => undefined);
   if (limits && limits.allowedBrowserAcquisitions < 1) {
-    throw new HncbBrowserCapacityError(
-      "Cloudflare 瀏覽器啟動頻率已達上限，請稍後再取得驗證碼。",
+    throw new BrowserRunCapacityError(
+      "acquisition_rate_limit",
       Math.max(
         1,
         Math.ceil(limits.timeUntilNextAllowedBrowserAcquisition / 1000),
@@ -1011,25 +1011,9 @@ async function launchBrowser(
   browserFetcher: Fetcher,
   keepAliveMs: number,
 ): Promise<Browser> {
-  try {
-    return await launchBrowserWithRetry(browserFetcher, {
-      keep_alive: keepAliveMs,
-    });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    if (/Browser time limit exceeded for today/i.test(message)) {
-      throw new HncbBrowserCapacityError(
-        "Cloudflare 瀏覽器今日使用額度已用完，請於額度重置後再試。",
-        60,
-      );
-    }
-    if (/429|rate limit|capacity/i.test(message)) {
-      throw new HncbBrowserCapacityError(
-        "Cloudflare 瀏覽器暫時達到使用上限，請稍後重試。",
-      );
-    }
-    throw error;
-  }
+  return launchBrowserWithRetry(browserFetcher, {
+    keep_alive: keepAliveMs,
+  });
 }
 
 async function closeHncbBrowser(browser: Browser, browserFetcher: Fetcher) {
@@ -1191,6 +1175,7 @@ function mapHncbError(error: unknown): Error {
   if (
     error instanceof HncbVerificationRequiredError ||
     error instanceof HncbBrowserCapacityError ||
+    error instanceof BrowserRunCapacityError ||
     error instanceof HncbConnectionError
   ) {
     return error;

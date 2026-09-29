@@ -36,7 +36,11 @@
     SyncTarget,
   } from "@/data/connectors/types";
   import { formatDateTime } from "@/shared/format/financial";
-  import { browserCaptchaFailure } from "./browser-captcha";
+  import {
+    browserCaptchaFailure,
+    needsNextbankCaptcha,
+  } from "./browser-captcha";
+  import { shouldEnableScheduleAfterFirstSync } from "./schedule-after-sync";
 
   let {
     api,
@@ -72,6 +76,10 @@
   let cathayOtpChannel = $state<"email" | "sms" | null>(null);
   let cathayVerificationExpiresAt = $state<string | null>(null);
   let cathayVerificationSecondsRemaining = $state<number | null>(null);
+  let bankOperation = $state<"idle" | "captcha" | "sync" | "success">("idle");
+  let bankCaptchaExpiresAt = $state<number | null>(null);
+  let bankCaptchaSeconds = $state(0);
+  let bankVerificationSubmitted = false;
   let bankCaptchaImage = $state("");
   let bankCaptcha = $state("");
   let bankCaptchaDigitCount = $state(6);
@@ -97,9 +105,11 @@
     connectorId === "sinopac" ||
       connectorId === "taishin" ||
       connectorId === "obank" ||
+      connectorId === "nextbank" ||
       connectorId === "firstbank" ||
       connectorId === "hncb" ||
-      connectorId === "kgibank",
+      connectorId === "kgibank" ||
+      connectorId === "megabank",
   );
   const browserBankSessionAvailable = $derived(
     browserBank && Boolean($settings.data?.sessionAvailable),
@@ -176,7 +186,12 @@
     }),
   );
   onMount(() => {
-    const timer = setInterval(updateCathayVerificationCountdown, 1_000);
+    const timer = setInterval(() => {
+      updateCathayVerificationCountdown();
+      bankCaptchaSeconds = bankCaptchaExpiresAt
+        ? Math.max(0, Math.ceil((bankCaptchaExpiresAt - Date.now()) / 1000))
+        : 0;
+    }, 1_000);
     return () => clearInterval(timer);
   });
   onDestroy(() => {
@@ -212,8 +227,16 @@
     onSuccess: () => qc.invalidateQueries({ queryKey: queryKeys.syncJobs }),
   });
   const sync = createMutation({
+    onMutate: () => ({
+      enableSchedule: shouldEnableScheduleAfterFirstSync(connectorId, job),
+    }),
     mutationFn: async (target: SyncTarget) => {
       if (demoMode) throw new Error("Demo site 已停用連接器同步。");
+      if (browserBank) {
+        if (connectorId === "nextbank") bankOperation = "sync";
+        bankCaptchaImage = "";
+        bankCaptcha = "";
+      }
       const path =
         connectorId === "tdcc" && target !== "default"
           ? `/api/connectors/${connectorId}/sync/${target}`
@@ -236,8 +259,9 @@
         throw errorValue;
       }
     },
-    onSuccess: () => {
+    onSuccess: (_data, _target, context) => {
       error = "";
+      if (connectorId === "nextbank") bankOperation = "success";
       if (connectorId === "cathaybk") {
         resetCathayVerification();
         cathayVerificationStep = "complete";
@@ -259,7 +283,8 @@
       invalidateLatestSyncReport();
       qc.invalidateQueries({ queryKey: queryKeys.syncJobs });
       qc.invalidateQueries({ queryKey: queryKeys.summary });
-      enableScheduleAfterSuccessfulSync();
+      enableScheduleAfterSuccessfulSync(context.enableSchedule);
+      qc.invalidateQueries({ queryKey: queryKeys.exchangeRates });
       if (
         connectorId === "esun" ||
         connectorId === "cathaybk" ||
@@ -290,6 +315,7 @@
       if (handleTdccVerificationRequired(e)) return;
       if (handleCathayVerificationRequired(e)) return;
       error = e instanceof Error ? e.message : "同步失敗";
+      if (needsNextbankCaptcha(connectorId, e)) $prepareBrowserBank.mutate();
       if (browserBank)
         qc.invalidateQueries({
           queryKey: queryKeys.connectorSettings(connectorId),
@@ -326,6 +352,10 @@
     mutationFn: () => {
       if (demoMode) throw new Error("Demo site 已停用連接器同步。");
       if (!browserBank) throw new Error("此資料來源不支援圖形驗證。");
+      if (connectorId === "nextbank") bankOperation = "captcha";
+      bankCaptchaImage = "";
+      bankCaptcha = "";
+      error = "";
       return api.post<{
         captchaImage: string;
         expiresAt: string;
@@ -337,15 +367,31 @@
     onSuccess: (data) => {
       error = "";
       bankCaptcha = "";
+      if (!data.captchaImage || !Number.isFinite(Date.parse(data.expiresAt))) {
+        error = "未取得有效驗證碼，請重新取得圖片。";
+        return;
+      }
       bankCaptchaImage = data.captchaImage;
+      bankCaptchaExpiresAt = Date.parse(data.expiresAt);
+      bankCaptchaSeconds = Math.max(
+        0,
+        Math.ceil((bankCaptchaExpiresAt - Date.now()) / 1000),
+      );
       bankCaptchaDigitCount = data.captchaLength ?? data.digitCount ?? 6;
       bankCaptchaKind = data.captchaKind ?? "numeric";
     },
     onError: (e) => (error = e instanceof Error ? e.message : "取得驗證碼失敗"),
   });
   const verifyBrowserBank = createMutation({
+    onMutate: () => ({
+      enableSchedule: shouldEnableScheduleAfterFirstSync(connectorId, job),
+    }),
     mutationFn: () => {
       if (demoMode) throw new Error("Demo site 已停用連接器同步。");
+      if (connectorId === "nextbank") bankOperation = "sync";
+      bankVerificationSubmitted = false;
+      if (!bankCaptchaExpiresAt || Date.now() >= bankCaptchaExpiresAt)
+        throw new Error("驗證碼已過期，請重新取得圖片。");
       const pattern =
         bankCaptchaKind === "alphanumeric"
           ? new RegExp(`^[A-Za-z0-9]{${bankCaptchaDigitCount}}$`)
@@ -354,14 +400,16 @@
         throw new Error(
           `請輸入圖片中的 ${bankCaptchaDigitCount} 位${bankCaptchaKind === "alphanumeric" ? "英數字" : "數字"}驗證碼。`,
         );
+      bankVerificationSubmitted = true;
       return api.post(`/api/connectors/${connectorId}/sync`, {
         captcha: bankCaptcha.trim(),
       });
     },
-    onSuccess: () => {
+    onSuccess: (_data, _variables, context) => {
       error = "";
       bankCaptcha = "";
       bankCaptchaImage = "";
+      if (connectorId === "nextbank") bankOperation = "success";
       qc.invalidateQueries({
         queryKey: queryKeys.connectorSettings(connectorId),
       });
@@ -370,12 +418,17 @@
       invalidateLatestSyncReport();
       qc.invalidateQueries({ queryKey: queryKeys.bank });
       qc.invalidateQueries({ queryKey: queryKeys.bills });
-      enableScheduleAfterSuccessfulSync();
+      enableScheduleAfterSuccessfulSync(context.enableSchedule);
     },
     onError: (e) => {
+      if (needsNextbankCaptcha(connectorId, e)) {
+        $prepareBrowserBank.mutate();
+        qc.invalidateQueries({ queryKey: queryKeys.syncJobs });
+        return;
+      }
       const failure = browserCaptchaFailure(e);
       error = failure.message;
-      if (failure.sessionInvalidated) {
+      if (failure.sessionInvalidated || bankVerificationSubmitted) {
         bankCaptcha = "";
         bankCaptchaImage = "";
         qc.invalidateQueries({
@@ -549,14 +602,8 @@
     $sync.mutate("default");
   }
 
-  function enableScheduleAfterSuccessfulSync() {
-    if (
-      (connectorId === "sinopac" ||
-        connectorId === "taishin" ||
-        connectorId === "obank") &&
-      job &&
-      !job.enabled
-    ) {
+  function enableScheduleAfterSuccessfulSync(eligible: boolean) {
+    if (eligible && job && !job.enabled) {
       $updateJob.mutate({ enabled: true });
     }
   }
@@ -754,6 +801,10 @@
         >
           <ShieldCheck class="size-3.5" />等待完成身分驗證
         </span>
+      {:else if connectorId === "nextbank"}
+        <span class="text-sm text-muted-foreground"
+          >在下方查看進度與同步帳戶</span
+        >
       {:else if browserBank}
         {#if browserBankSessionAvailable}
           <Button
@@ -860,18 +911,150 @@
       source="cathaybk"
     />
   {:else if browserBank}
+    {#if connectorId === "nextbank"}
+      <section
+        aria-label="同步進度"
+        aria-live="polite"
+        class="mt-3 rounded-xl border border-border bg-muted/40 p-4"
+      >
+        {#if !$settings.data?.credentialsComplete}
+          <p class="font-semibold">先儲存帳密</p>
+          <p class="mt-1 text-sm text-muted-foreground">
+            請填寫下方連線憑證並儲存，再按「同步帳戶」。
+          </p>
+        {:else if $prepareBrowserBank.isPending}
+          <p role="status" class="font-semibold">正在取得驗證碼圖片…</p>
+          <p class="mt-1 text-sm">
+            取得後會在下方顯示圖片與輸入欄，請勿重複點擊。
+          </p>
+        {:else if $sync.isPending || $verifyBrowserBank.isPending || job?.running}
+          <p role="status" class="font-semibold">正在登入並查詢帳戶…</p>
+          <p class="mt-1 text-sm">尚未完成同步，請勿重複提交。</p>
+        {:else if error}
+          <p role="alert" class="font-semibold text-coral">
+            {bankOperation === "captcha"
+              ? "無法取得驗證碼"
+              : "同步未完成"}：{error.includes("transport")
+              ? "目前無法連線到銀行，這不代表帳密錯誤。請稍後再試；手動驗證無法解決連線問題。"
+              : error}
+          </p>
+        {:else if bankOperation === "success"}
+          <p role="status" class="font-semibold text-moss">
+            同步成功，帳戶資料已更新。
+          </p>
+        {:else if bankCaptchaImage}
+          <p class="font-semibold">
+            {bankCaptchaSeconds > 0
+              ? "請輸入下方圖片中的驗證碼"
+              : "驗證碼已過期"}
+          </p>
+          <p class="mt-1 text-sm">
+            {bankCaptchaSeconds > 0
+              ? "填寫後按「驗證並同步」，目前尚未登入或同步。"
+              : "請按下方「換一張」取得新圖片。"}
+          </p>
+        {:else if job?.lastStatus === "needs_user_action"}
+          <p class="font-semibold">需要處理登入驗證</p>
+          <p class="mt-1 text-sm">
+            請查看最近失敗原因；若需手動輸入驗證碼，可按「改用手動驗證」。
+          </p>
+        {:else}
+          <p class="font-semibold">可以開始同步</p>
+          <p class="mt-1 text-sm text-muted-foreground">
+            「同步帳戶」會自動處理登入與圖形驗證碼。只有辨識失敗，或你想自行輸入圖片內容時，才使用「改用手動驗證」。
+          </p>
+        {/if}
+        {#if !bankCaptchaImage}
+          <div class="mt-3 flex flex-wrap gap-2">
+            <Button
+              size="sm"
+              disabled={demoMode ||
+                !$settings.data?.credentialsComplete ||
+                job?.running ||
+                $save.isPending ||
+                $sync.isPending ||
+                $prepareBrowserBank.isPending ||
+                $verifyBrowserBank.isPending}
+              onclick={() => {
+                error = "";
+                $sync.mutate("default");
+              }}
+            >
+              <RefreshCw
+                class={$sync.isPending || $verifyBrowserBank.isPending
+                  ? "size-4 animate-spin"
+                  : "size-4"}
+              />
+              {$sync.isPending || $verifyBrowserBank.isPending
+                ? "同步中…"
+                : "同步帳戶"}
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={demoMode ||
+                !$settings.data?.credentialsComplete ||
+                job?.running ||
+                $save.isPending ||
+                $sync.isPending ||
+                $prepareBrowserBank.isPending ||
+                $verifyBrowserBank.isPending}
+              onclick={() => $prepareBrowserBank.mutate()}
+            >
+              <KeyRound class="size-4" />{$prepareBrowserBank.isPending
+                ? "取得驗證碼中…"
+                : bankOperation === "captcha"
+                  ? "重新取得驗證碼"
+                  : "改用手動驗證"}
+            </Button>
+          </div>
+        {/if}
+        <p class="mt-3 border-t border-border pt-3 text-sm">
+          最近同步結果：{bankOperation === "success"
+            ? "成功"
+            : bankOperation === "sync" && error
+              ? "失敗"
+              : job?.lastStatus === "success"
+                ? "成功"
+                : job?.lastStatus === "failed"
+                  ? "失敗"
+                  : job?.lastStatus === "needs_user_action"
+                    ? "未完成，需要驗證"
+                    : "尚未同步"}
+        </p>
+        {#if job?.lastRunAt}<p class="mt-1 text-sm text-muted-foreground">
+            最近嘗試：{formatDateTime(job.lastRunAt)}
+          </p>{/if}
+        <p class="mt-1 text-sm text-muted-foreground">
+          最近成功更新：{job?.lastSuccessAt
+            ? formatDateTime(job.lastSuccessAt)
+            : "尚無成功紀錄"}
+        </p>
+        {#if !error && bankOperation === "idle" && job?.lastStatus !== "success" && job?.lastError}<p
+            class="mt-1 text-sm text-coral"
+          >
+            最近失敗原因：{job.lastError.includes("transport")
+              ? "無法連線到銀行，請稍後再試。"
+              : job.lastError}
+          </p>{/if}
+      </section>
+    {/if}
     <BrowserBankConnectionHelp
-      bankName={connectorId === "taishin"
-        ? "台新"
-        : connectorId === "obank"
-          ? "王道"
-          : connectorId === "hncb"
-            ? "華南"
-            : connectorId === "firstbank"
-              ? "第一銀行"
-              : connectorId === "kgibank"
-                ? "凱基"
-                : "永豐"}
+      bankName={connectorId === "nextbank"
+        ? "將來"
+        : connectorId === "taishin"
+          ? "台新"
+          : connectorId === "obank"
+            ? "王道"
+            : connectorId === "hncb"
+              ? "華南"
+              : connectorId === "firstbank"
+                ? "第一銀行"
+                : connectorId === "kgibank"
+                  ? "凱基"
+                  : connectorId === "megabank"
+                    ? "兆豐"
+                    : "永豐"}
       bind:captcha={bankCaptcha}
       captchaImage={bankCaptchaImage}
       digitCount={bankCaptchaDigitCount}
@@ -879,6 +1062,7 @@
       preparing={$prepareBrowserBank.isPending}
       verifying={$verifyBrowserBank.isPending}
       syncing={$sync.isPending}
+      expiresIn={connectorId === "nextbank" ? bankCaptchaSeconds : undefined}
       onVerify={() => {
         error = "";
         $verifyBrowserBank.mutate();
@@ -895,12 +1079,12 @@
           <span class="font-semibold text-ink">
             自動同步：{job?.enabled ? "開" : "關"}
           </span>
-          {#if browserBank}<span
+          {#if browserBank && connectorId !== "nextbank"}<span
               >登入：{browserBankSessionAvailable
                 ? "session 可自動續用"
                 : "下次同步會自動驗證"}</span
             >{/if}
-          {#if job}<span
+          {#if job && connectorId !== "nextbank"}<span
               >狀態：{job.running
                 ? "同步中"
                 : job.lastStatus === "success"
@@ -912,9 +1096,9 @@
                       : "尚未同步"}</span
             >{/if}
         </div>
-        {#if job?.lastRunAt}
+        {#if job?.lastRunAt && connectorId !== "nextbank"}
           <p class="mt-1 text-sm text-muted-foreground">
-            上次同步：{formatDateTime(job.lastRunAt)}
+            最近嘗試：{formatDateTime(job.lastRunAt)}
           </p>
         {/if}
       </div>
@@ -927,6 +1111,13 @@
         >{/if}
     </div>
 
+    {#if connectorId === "nextbank"}
+      <p class="mt-2 text-sm text-muted-foreground">
+        {job?.enabled
+          ? "依下方排程自動嘗試同步；結果請看同步進度。"
+          : "目前只會在你手動操作時同步。"}
+      </p>
+    {/if}
     {#if job?.enabled}
       <div class="mt-3 grid gap-3 border-t border-ink/10 pt-3 md:grid-cols-4">
         <label class="grid gap-1 text-sm font-semibold text-ink/70">
@@ -1020,7 +1211,7 @@
         {/if}
       </div>
     {/if}
-    {#if error || ((job?.lastStatus === "failed" || job?.lastStatus === "needs_user_action") && !bankCaptchaImage)}<p
+    {#if connectorId !== "nextbank" && (error || ((job?.lastStatus === "failed" || job?.lastStatus === "needs_user_action") && !bankCaptchaImage))}<p
         class="mt-2 text-sm text-coral"
       >
         {error
@@ -1355,18 +1546,22 @@
       {error}
     </p>{/if}
   <p class="mt-3 text-sm text-ink/50">
-    {connectorId === "sinopac"
-      ? "永豐 session 失效時會由 Gemma 4 自動辨識並登入，連續三次失敗後才需人工驗證。"
-      : connectorId === "obank"
-        ? "王道手動與排程同步都會在必要時接管其他登入中的裝置；同步會直接使用 App API，並由 Gemma 4 自動辨識四位英數驗證碼。"
-        : connectorId === "firstbank"
-          ? "第一銀行網銀 session 失效時會自動辨識圖形驗證碼並登入；也可改用人工輸入。"
-          : connectorId === "kgibank"
-            ? "凱基每次同步都會自動辨識 6 位數圖形驗證碼，連續失敗後可改用人工輸入。同一帳號僅允許單一登入，同步會登出行動銀行 App；同步完成後會自動登出網銀。"
-            : connectorId === "tdcc"
-              ? "排程同步不會在背景寄送驗證碼；登入失效時會標記為需要重新驗證。"
-              : connectorId === "cathaybk"
-                ? "首次驗證會加入信任裝置；信任失效時需在手動同步中重新取得驗證碼。"
-                : "輸入完帳號密碼後，請先按「儲存設定」，再按「同步」。"}
+    {connectorId === "nextbank"
+      ? "將來銀行同步會嘗試辨識圖形驗證碼；需要時使用手動驗證。每次查詢後登出，投資持倉尚未接入。"
+      : connectorId === "sinopac"
+        ? "永豐 session 失效時會由 Gemma 4 自動辨識並登入，連續三次失敗後才需人工驗證。"
+        : connectorId === "obank"
+          ? "王道手動與排程同步都會在必要時接管其他登入中的裝置；同步會直接使用 App API，並由 Gemma 4 自動辨識四位英數驗證碼。"
+          : connectorId === "firstbank"
+            ? "第一銀行網銀 session 失效時會自動辨識圖形驗證碼並登入；也可改用人工輸入。"
+            : connectorId === "kgibank"
+              ? "凱基每次同步都會自動辨識 6 位數圖形驗證碼，連續失敗後可改用人工輸入。同一帳號僅允許單一登入，同步會登出行動銀行 App；同步完成後會自動登出網銀。"
+              : connectorId === "tdcc"
+                ? "排程同步不會在背景寄送驗證碼；登入失效時會標記為需要重新驗證。"
+                : connectorId === "cathaybk"
+                  ? "首次驗證會加入信任裝置；信任失效時需在手動同步中重新取得驗證碼。"
+                  : connectorId === "megabank"
+                    ? "兆豐同步直接使用 App API，以一般帳密登入並辨識五位數圖形驗證碼；也可改用人工輸入。"
+                    : "輸入完帳號密碼後，請先按「儲存設定」，再按「同步」。"}
   </p>
 </Card>

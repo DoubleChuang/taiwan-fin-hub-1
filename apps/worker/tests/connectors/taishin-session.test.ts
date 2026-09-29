@@ -9,10 +9,10 @@ const puppeteerMock = vi.hoisted(() => ({
 
 vi.mock("@cloudflare/puppeteer", () => ({ default: puppeteerMock }));
 
+import { BrowserRunCapacityError } from "../../src/connectors/browser";
 import {
   createTaishinConnector,
   prepareTaishinCaptcha,
-  TaishinBrowserCapacityError,
   TaishinCaptchaRejectedError,
   TaishinConnectionError,
   TaishinCredentialRejectedError,
@@ -143,6 +143,15 @@ beforeEach(() => {
 });
 
 describe("Taishin browser session lifecycle", () => {
+  it("preserves a shared Browser Run launch error through stage normalization", async () => {
+    puppeteerMock.launch.mockRejectedValueOnce(
+      new Error("Unable to create new browser: code: 429"),
+    );
+    await expect(
+      createTaishinConnector({} as Fetcher).sync(credentials),
+    ).rejects.toBeInstanceOf(BrowserRunCapacityError);
+  });
+
   it("labels an empty browser acquisition error", async () => {
     puppeteerMock.launch.mockRejectedValueOnce(new Error(""));
 
@@ -1049,6 +1058,85 @@ describe("Taishin browser session lifecycle", () => {
     );
   });
 
+  it("retries an unusable OCR result with a fresh CAPTCHA before submitting login", async () => {
+    const browserPage = page();
+    const activeSession = {
+      ok: true,
+      status: 200,
+      contentType: "application/json",
+      text: JSON.stringify({ RESULT: "SUCCESS", DBSESSIONID: "session" }),
+    };
+    const response = (value: unknown) => ({
+      ok: true,
+      status: 200,
+      contentType: "application/json",
+      text: JSON.stringify({ value, error: null }),
+    });
+    browserPage.evaluate
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(selectors)
+      .mockResolvedValueOnce(captchaTarget)
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(selectors)
+      .mockResolvedValueOnce(captchaTarget)
+      .mockResolvedValueOnce(true)
+      .mockResolvedValueOnce("登入成功")
+      .mockResolvedValueOnce(activeSession)
+      .mockResolvedValueOnce(response({ fmtRealTxListMap: [] }))
+      .mockResolvedValueOnce(
+        response({ "001": { "OUT-DTE-LST-STMT": "20260720" } }),
+      )
+      .mockResolvedValueOnce(response({}));
+    const browserInstance = browser(browserPage);
+    puppeteerMock.launch.mockResolvedValue(browserInstance);
+    const recognize = vi
+      .fn()
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce("123456");
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+    const result = await createTaishinConnector({} as Fetcher, recognize).sync(
+      credentials,
+    );
+
+    expect(result.bankAccounts).toHaveLength(1);
+    expect(recognize).toHaveBeenCalledTimes(2);
+    expect(browserPage.goto).toHaveBeenCalledTimes(2);
+    expect(browserPage.type).toHaveBeenCalledOnce();
+    expect(JSON.parse(String(warn.mock.calls[0]?.[0]))).toEqual({
+      event: "taishin_ocr_invalid_result",
+      connectorId: "taishin",
+      attempt: 1,
+      digitCount: 6,
+    });
+    warn.mockRestore();
+  });
+
+  it("requires manual verification after three unusable OCR results without submitting login", async () => {
+    const browserPage = page();
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      browserPage.evaluate
+        .mockResolvedValueOnce(false)
+        .mockResolvedValueOnce(selectors)
+        .mockResolvedValueOnce(captchaTarget);
+    }
+    const browserInstance = browser(browserPage);
+    puppeteerMock.launch.mockResolvedValue(browserInstance);
+    const recognize = vi.fn().mockResolvedValue(null);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+    await expect(
+      createTaishinConnector({} as Fetcher, recognize).sync(credentials),
+    ).rejects.toThrow("連續失敗 3 次");
+
+    expect(recognize).toHaveBeenCalledTimes(3);
+    expect(browserPage.goto).toHaveBeenCalledTimes(3);
+    expect(browserPage.type).not.toHaveBeenCalled();
+    expect(warn).toHaveBeenCalledTimes(3);
+    expect(browserInstance.close).toHaveBeenCalledOnce();
+    warn.mockRestore();
+  });
+
   it("stops automatic login immediately when credentials are rejected", async () => {
     const browserPage = page();
     rejectLoginSequence(browserPage, "使用者密碼錯誤");
@@ -1090,7 +1178,7 @@ describe("Taishin browser session lifecycle", () => {
 
     await expect(
       prepareTaishinCaptcha({} as Fetcher, credentials),
-    ).rejects.toBeInstanceOf(TaishinBrowserCapacityError);
+    ).rejects.toBeInstanceOf(BrowserRunCapacityError);
     expect(puppeteerMock.launch).not.toHaveBeenCalled();
   });
 });

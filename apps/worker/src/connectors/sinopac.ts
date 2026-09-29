@@ -1,4 +1,4 @@
-import { launchBrowserWithRetry } from "./browser.js";
+import { BrowserRunCapacityError, launchBrowserWithRetry } from "./browser.js";
 import puppeteer, {
   type Browser,
   type Dialog,
@@ -504,8 +504,8 @@ async function getCaptchaBrowser(
       1,
       Math.ceil(limits.timeUntilNextAllowedBrowserAcquisition / 1000),
     );
-    throw new SinopacBrowserCapacityError(
-      "Cloudflare 瀏覽器啟動頻率已達上限，請稍後再取得驗證碼。",
+    throw new BrowserRunCapacityError(
+      "acquisition_rate_limit",
       retryAfterSeconds,
     );
   }
@@ -516,24 +516,7 @@ async function launchBrowser(
   browser: Fetcher,
   options?: { keep_alive?: number },
 ) {
-  try {
-    return await launchBrowserWithRetry(browser, options);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    if (/Browser time limit exceeded for today/i.test(message)) {
-      throw new SinopacBrowserCapacityError(
-        "Cloudflare 瀏覽器今日使用額度已用完，請於額度重置後再試。",
-        60,
-      );
-    }
-    if (/code:\s*429|rate limit exceeded/i.test(message)) {
-      throw new SinopacBrowserCapacityError(
-        "Cloudflare 瀏覽器暫時達到使用上限，請稍後再試。",
-        20,
-      );
-    }
-    throw error;
-  }
+  return launchBrowserWithRetry(browser, options);
 }
 
 async function configurePage(page: Page) {

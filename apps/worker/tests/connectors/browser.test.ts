@@ -4,9 +4,13 @@ const launch = vi.hoisted(() => vi.fn());
 const connect = vi.hoisted(() => vi.fn());
 vi.mock("@cloudflare/puppeteer", () => ({ default: { launch, connect } }));
 import {
+  BrowserRunCapacityError,
+  classifyBrowserRunCapacityError,
   createBrowserBinding,
   launchBrowserWithRetry,
 } from "../../src/connectors/browser";
+import { createCathaybkConnector } from "../../src/connectors/cathaybk";
+import { createEsunConnector } from "../../src/connectors/esun";
 
 type Binding = Parameters<typeof launchBrowserWithRetry>[0];
 const acquisitionUrl = "https://fake.host/v1/devtools/browser?keep_alive=60000";
@@ -165,5 +169,83 @@ describe("browser acquisition retry", () => {
       });
       expect(binding).toBe(mockBrowserBinding);
     });
+  });
+});
+
+describe("Browser Run capacity errors", () => {
+  beforeEach(() => launch.mockReset());
+
+  it.each([
+    ["2026-09-27T23:59:59.500Z", 1],
+    ["2026-09-28T00:00:00.000Z", 86_400],
+  ])("reports the next Taiwan 08:00 reset from %s", (time, seconds) => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(time));
+    try {
+      expect(
+        classifyBrowserRunCapacityError(
+          new Error(
+            "Unable to create new browser: code: 429: message: Browser time limit exceeded for today",
+          ),
+        ),
+      ).toMatchObject({
+        kind: "daily_quota",
+        retryAfterSeconds: seconds,
+        message: expect.stringContaining("每日台灣時間早上 8 點重置"),
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each([
+    "Unable to create new browser: code: 429: message: Rate limit exceeded",
+    "Rate limit exceeded",
+    "Too many requests",
+    "Browser capacity exceeded",
+  ])("classifies a short Browser Run limit: %s", (message) => {
+    expect(classifyBrowserRunCapacityError(new Error(message))).toMatchObject({
+      kind: "rate_limit",
+      retryAfterSeconds: 20,
+    });
+  });
+
+  it.each([
+    new Error(
+      "Unable to create new browser: code: 503: message: capacity unavailable",
+    ),
+    new Error("E.SUN API responded with HTTP 429"),
+    new Error("Navigation timeout"),
+  ])("leaves unrelated errors alone: %s", (error) => {
+    expect(classifyBrowserRunCapacityError(error)).toBeUndefined();
+  });
+
+  it("converts launch limits and preserves unrelated launch failures", async () => {
+    launch.mockRejectedValueOnce(
+      new Error("Unable to create new browser: code: 429"),
+    );
+    await expect(launchBrowserWithRetry({} as Fetcher)).rejects.toBeInstanceOf(
+      BrowserRunCapacityError,
+    );
+
+    const unrelated = new Error("socket hang up");
+    launch.mockRejectedValueOnce(unrelated);
+    await expect(launchBrowserWithRetry({} as Fetcher)).rejects.toBe(unrelated);
+  });
+
+  it.each([
+    ["esun", createEsunConnector],
+    ["cathaybk", createCathaybkConnector],
+  ])("propagates %s launch limits", async (_id, createConnector) => {
+    launch.mockRejectedValueOnce(
+      new Error("Unable to create new browser: code: 429"),
+    );
+    await expect(
+      createConnector({} as Fetcher).sync({
+        userId: "A123456789",
+        account: "test-user",
+        password: "test-password",
+      }),
+    ).rejects.toBeInstanceOf(BrowserRunCapacityError);
   });
 });

@@ -7,6 +7,7 @@ const INVALIDATED_CAPTCHA_SESSION_CODES = new Set([
   "OBANK_CONNECTION_FAILED",
   "FIRSTBANK_BROWSER_BUSY",
   "FIRSTBANK_CONNECTION_FAILED",
+  "MEGABANK_CONNECTION_FAILED",
 ]);
 
 export function browserCaptchaFailure(error: unknown) {
@@ -22,4 +23,12 @@ export function browserCaptchaFailure(error: unknown) {
     message: sessionInvalidated ? `${message} 請重新取得驗證碼。` : message,
     sessionInvalidated,
   };
+}
+
+export function needsNextbankCaptcha(connectorId: string, error: unknown) {
+  return (
+    connectorId === "nextbank" &&
+    error instanceof ApiRequestError &&
+    error.code === "NEXTBANK_CAPTCHA_REQUIRED"
+  );
 }

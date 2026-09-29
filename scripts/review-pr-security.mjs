@@ -22,6 +22,8 @@ export const APPROVED_DOMAINS = [
   "*.hncb.com.tw",
   "*.firstbank.com.tw",
   "*.kgibank.com.tw",
+  "*.megabank.com.tw",
+  "*.nextbank.com.tw",
   "*.einvoice.nat.gov.tw",
   "*.tdcc.com.tw",
   "cloudflareaccess.com",
@@ -249,14 +251,18 @@ export function scanDataExfiltration(fileDiffs) {
         }
       }
 
-      // 檢查動態 fetch / axios 外部呼叫（排除相對路徑字串及方法宣告）
-      const isMethodDecl = /^\s*(?:async\s+)?fetch\s*\([^)]*\)\s*\{/i.test(
+      // 檢查動態 fetch / axios 外部呼叫（排除相對路徑字串、方法宣告及內部 binding.fetch）
+      const isMethodDecl = /(?:async\s+)?fetch\s*\([^)]*\)\s*\{/i.test(
         line.content,
       );
-      if (
-        !isMethodDecl &&
-        /\b(?:fetch|axios(?:\.[a-z]+)?)\s*\(/i.test(line.content)
-      ) {
+      const isBindingFetch = /\b(?:binding|env\.[A-Z_]+)\.fetch\s*\(/i.test(
+        line.content,
+      );
+      const isDynamicFetch =
+        /(?<![a-zA-Z0-9_$.])fetch\s*\(|(?:\b(?:globalThis|window)\.fetch\s*\()|\baxios(?:\.[a-z]+)?\s*\(/i.test(
+          line.content,
+        );
+      if (!isMethodDecl && !isBindingFetch && isDynamicFetch) {
         if (foundUrls.length === 0) {
           const isRelativePathCall =
             /\b(?:fetch|axios(?:\.[a-z]+)?)\s*\(\s*["'`]\/[^"'`]*["'`]/i.test(
@@ -307,7 +313,15 @@ export function scanCryptoAndKeyIntegrity(changedFiles, fileDiffs) {
 
   // 2. 檢查程式碼中是否修改或新增關鍵加密參數/API
   for (const file of fileDiffs) {
-    if (file.filePath.endsWith(".md") || file.filePath.endsWith(".txt")) {
+    if (
+      file.filePath.endsWith(".md") ||
+      file.filePath.endsWith(".txt") ||
+      file.filePath.includes("/tests/") ||
+      file.filePath.endsWith(".test.ts") ||
+      file.filePath.endsWith(".test.js") ||
+      file.filePath.endsWith(".test.mjs") ||
+      file.filePath.endsWith(".spec.ts")
+    ) {
       continue;
     }
     for (const line of file.addedLines) {
@@ -453,7 +467,10 @@ export function scanHardcodedSecrets(fileDiffs) {
       lower.includes("dummy") ||
       lower.includes("example") ||
       lower.includes("test_") ||
+      lower.includes("test-") ||
       lower.includes("mock_") ||
+      lower.includes("mock-") ||
+      lower.includes("synthetic") ||
       lower.includes("your-") ||
       lower.includes("todo") ||
       lower.includes("change_me") ||

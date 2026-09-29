@@ -9,6 +9,7 @@ const puppeteerMock = vi.hoisted(() => ({
 
 vi.mock("@cloudflare/puppeteer", () => ({ default: puppeteerMock }));
 
+import { BrowserRunCapacityError } from "../../src/connectors/browser";
 import {
   createHncbConnector,
   prepareHncbCaptcha,
@@ -181,6 +182,15 @@ beforeEach(() => {
 });
 
 describe("HNCB browser session lifecycle", () => {
+  it("preserves a shared Browser Run launch error through connector normalization", async () => {
+    puppeteerMock.launch.mockRejectedValueOnce(
+      new Error("Unable to create new browser: code: 429"),
+    );
+    await expect(
+      createHncbConnector({} as Fetcher).sync(credentials),
+    ).rejects.toBeInstanceOf(BrowserRunCapacityError);
+  });
+
   it("closes a browser when CAPTCHA preparation stalls past its deadline", async () => {
     vi.useFakeTimers();
     const browserPage = page();
