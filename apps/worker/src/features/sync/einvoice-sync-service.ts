@@ -17,7 +17,6 @@ import { getConnectorSettings, nextSyncRunAt } from "@taiwan-fin-hub/db";
 import { configEncryptionKey } from "../../platform/config";
 import { decryptJson, encryptJson } from "../../platform/crypto";
 import type { Env } from "../../platform/env";
-import { createRelayFetch } from "../../connectors/relay-fetch";
 import {
   safelySendScheduledSyncSummary,
   safelySendSyncNotification,
@@ -152,10 +151,8 @@ async function processLeasedEinvoiceSyncChunk(
 ): Promise<EinvoiceChunkResult> {
   let run = initialRun;
   const runId = run.id;
-  const relayFetch = createRelayFetch(env);
   const client = new EInvoiceV2Client({
     timeoutMs: EINVOICE_REQUEST_TIMEOUT_MS,
-    fetchImpl: relayFetch,
   });
   if (!(await holdEinvoiceRunLock(env.DB, run.id, run.trigger))) {
     throw new Error("Electronic invoice sync lost its connector lock.");

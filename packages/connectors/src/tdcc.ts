@@ -261,7 +261,6 @@ export type TdccBankEntry = {
 export function createTdccClient(
   config: TdccConfig,
   cursor?: string,
-  fetcher?: typeof fetch,
 ): {
   client: EPassbookClient;
   identity: TdccIdentity;
@@ -283,7 +282,6 @@ export function createTdccClient(
       devType: identity.devType,
       devModel: identity.devModel,
       session: identity.session,
-      fetcher,
     }),
     identity,
     previous,
@@ -382,9 +380,8 @@ async function fetchTdccSnapshot(
 export async function initializeTdccSnapshot(
   config: TdccConfig,
   cursor?: string,
-  fetcher?: typeof fetch,
 ): Promise<TdccSnapshotInitialization> {
-  const state = createTdccClient(config, cursor, fetcher);
+  const state = createTdccClient(config, cursor);
   try {
     await ensureTdccSession(state.client, config);
     const snapshot = await fetchTdccSnapshot(state.client);
@@ -410,7 +407,6 @@ export async function initializeTdccSnapshot(
         devModel: state.identity.devModel,
         session: undefined,
       }),
-      fetcher,
     );
     await ensureTdccSession(fresh.client, {
       ...config,
