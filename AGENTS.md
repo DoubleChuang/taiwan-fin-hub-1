@@ -69,6 +69,7 @@
 | 後端架構、同步、Queue、排程             | `docs/002-backend-architecture.md`                              |
 | 前端結構、資料查詢、共用元件            | `docs/003-frontend-architecture.md`                             |
 | 連接器、登入、驗證碼、資料正規化        | `docs/004-connector-development.md`；涉及同步流程時也讀後端架構 |
+| 連接器連線方式、驗證流程總覽            | `docs/006-connector-connections.md`                             |
 | 部署、自動更新、環境變數                | `docs/005-deployment.md`、`README.md` 對應章節                  |
 | 資料庫 schema                           | `docs/database-schema.md`、相關 `packages/db/migrations/*.sql`  |
 | Drizzle schema、client、repository 轉換 | `docs/002-backend-architecture.md`                              |
