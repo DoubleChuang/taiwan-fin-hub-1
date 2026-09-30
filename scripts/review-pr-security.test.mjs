@@ -226,6 +226,8 @@ diff --git a/apps/worker/src/config.ts b/apps/worker/src/config.ts
 @@ -1,2 +1,4 @@
 +const dummyPassword = "temporary-placeholder";
 +const placeholderKey = "your-api-key";
++const testAccountPassword = "testpass12";
++const syntheticToken = "synthetic-token";
 `;
   const fileDiffs = parseUnifiedDiff(placeholderDiff);
   const findings = scanHardcodedSecrets(fileDiffs);

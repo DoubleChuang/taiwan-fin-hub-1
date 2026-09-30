@@ -469,6 +469,7 @@ export function scanHardcodedSecrets(fileDiffs) {
       lower.includes("example") ||
       lower.includes("test_") ||
       lower.includes("test-") ||
+      lower.startsWith("test") ||
       lower.includes("mock_") ||
       lower.includes("mock-") ||
       lower.includes("synthetic") ||
