@@ -1,6 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   CtbcConnectionError,
+  MegabankOtpInvalidError,
+  MegabankOtpRequiredError,
   ObankConnectionError,
   SkbankConnectionError,
 } from "@taiwan-fin-hub/connectors";
@@ -17,6 +19,10 @@ import {
   KgibankBrowserCapacityError,
   KgibankConnectionError,
 } from "../../../src/connectors/kgibank";
+import {
+  RakutenBrowserCapacityError,
+  RakutenConnectionError,
+} from "../../../src/connectors/rakuten";
 import {
   CathayOtpChannelRequiredError,
   CathayOtpInvalidError,
@@ -43,6 +49,7 @@ const mocks = vi.hoisted(() => ({
   prepareNextbankCaptchaSession: vi.fn(),
   syncNextbank: vi.fn(),
   prepareFirstbankCaptchaSession: vi.fn(),
+  prepareRakutenCaptchaSession: vi.fn(),
   startEinvoiceSyncRun: vi.fn(),
   startTdccSyncRun: vi.fn(),
   syncCtbc: vi.fn(),
@@ -53,6 +60,7 @@ const mocks = vi.hoisted(() => ({
   syncFirstbank: vi.fn(),
   syncHncb: vi.fn(),
   syncKgibank: vi.fn(),
+  syncRakuten: vi.fn(),
   syncSinopac: vi.fn(),
   syncTaishin: vi.fn(),
   syncSkbank: vi.fn(),
@@ -73,48 +81,58 @@ vi.mock("../../../src/features/sync/scheduler-queue", () => ({
   enqueueTdccSyncChunk: mocks.enqueueTdccSyncChunk,
 }));
 
-vi.mock("../../../src/features/sync/service", () => ({
-  NeedsUserActionError: class NeedsUserActionError extends Error {},
-  NextbankCaptchaRequiredError: class NextbankCaptchaRequiredError extends Error {},
-  prepareSinopacCaptchaSession: mocks.prepareSinopacCaptchaSession,
-  prepareHncbCaptchaSession: mocks.prepareHncbCaptchaSession,
-  prepareKgibankCaptchaSession: mocks.prepareKgibankCaptchaSession,
-  prepareTaishinCaptchaSession: mocks.prepareTaishinCaptchaSession,
-  prepareObankCaptchaSession: mocks.prepareObankCaptchaSession,
-  prepareMegabankCaptchaSession: mocks.prepareMegabankCaptchaSession,
-  prepareNextbankCaptchaSession: mocks.prepareNextbankCaptchaSession,
-  syncNextbank: mocks.syncNextbank,
-  prepareFirstbankCaptchaSession: mocks.prepareFirstbankCaptchaSession,
-  safeErrorMessage: (error: unknown) =>
-    error instanceof Error ? error.message : String(error),
-  syncCathaybk: mocks.syncCathaybk,
-  syncCtbc: mocks.syncCtbc,
-  syncEinvoice: vi.fn(),
-  syncEsun: mocks.syncEsun,
-  syncSinopac: mocks.syncSinopac,
-  syncObank: mocks.syncObank,
-  syncMegabank: mocks.syncMegabank,
-  syncFirstbank: mocks.syncFirstbank,
-  syncHncb: mocks.syncHncb,
-  syncKgibank: mocks.syncKgibank,
-  syncTaishin: mocks.syncTaishin,
-  syncSkbank: mocks.syncSkbank,
-  syncTdcc: vi.fn(),
-  SyncAlreadyRunningError: class SyncAlreadyRunningError extends Error {},
-  SYNC_SCOPE_ALL: "all",
-  TDCC_SCOPE_BANK: "bank",
-  TDCC_SCOPE_INVESTMENTS: "investments",
-  TDCC_SCOPE_TRADES: "trades",
-  withManualSyncLock: async (
-    _env: Env,
-    _connectorId: string,
-    _scope: string,
-    task: () => Promise<unknown>,
-  ) => task(),
-}));
+vi.mock("../../../src/features/sync/service", () => {
+  class NeedsUserActionError extends Error {}
+  return {
+    NeedsUserActionError,
+    ManualCaptchaRequiredError: class ManualCaptchaRequiredError extends NeedsUserActionError {},
+    NextbankCaptchaRequiredError: class NextbankCaptchaRequiredError extends Error {},
+    prepareRakutenCaptchaSession: mocks.prepareRakutenCaptchaSession,
+    syncRakuten: mocks.syncRakuten,
+    prepareSinopacCaptchaSession: mocks.prepareSinopacCaptchaSession,
+    prepareHncbCaptchaSession: mocks.prepareHncbCaptchaSession,
+    prepareKgibankCaptchaSession: mocks.prepareKgibankCaptchaSession,
+    prepareTaishinCaptchaSession: mocks.prepareTaishinCaptchaSession,
+    prepareObankCaptchaSession: mocks.prepareObankCaptchaSession,
+    prepareMegabankCaptchaSession: mocks.prepareMegabankCaptchaSession,
+    prepareNextbankCaptchaSession: mocks.prepareNextbankCaptchaSession,
+    syncNextbank: mocks.syncNextbank,
+    prepareFirstbankCaptchaSession: mocks.prepareFirstbankCaptchaSession,
+    safeErrorMessage: (error: unknown) =>
+      error instanceof Error ? error.message : String(error),
+    syncCathaybk: mocks.syncCathaybk,
+    syncCtbc: mocks.syncCtbc,
+    syncEinvoice: vi.fn(),
+    syncEsun: mocks.syncEsun,
+    syncSinopac: mocks.syncSinopac,
+    syncObank: mocks.syncObank,
+    syncMegabank: mocks.syncMegabank,
+    syncFirstbank: mocks.syncFirstbank,
+    syncHncb: mocks.syncHncb,
+    syncKgibank: mocks.syncKgibank,
+    syncTaishin: mocks.syncTaishin,
+    syncSkbank: mocks.syncSkbank,
+    syncTdcc: vi.fn(),
+    SyncAlreadyRunningError: class SyncAlreadyRunningError extends Error {},
+    SYNC_SCOPE_ALL: "all",
+    TDCC_SCOPE_BANK: "bank",
+    TDCC_SCOPE_INVESTMENTS: "investments",
+    TDCC_SCOPE_TRADES: "trades",
+    withManualSyncLock: async (
+      _env: Env,
+      _connectorId: string,
+      _scope: string,
+      task: () => Promise<unknown>,
+    ) => task(),
+  };
+});
 
 import { syncRoutes } from "../../../src/features/sync/route";
-import { NextbankCaptchaRequiredError } from "../../../src/features/sync/service";
+import {
+  ManualCaptchaRequiredError,
+  NeedsUserActionError,
+  NextbankCaptchaRequiredError,
+} from "../../../src/features/sync/service";
 
 const env = {} as Env;
 
@@ -142,6 +160,24 @@ beforeEach(() => {
     expiresAt: "2026-08-19T08:02:00.000Z",
     digitCount: 4,
     captchaKind: "numeric",
+  });
+  mocks.prepareRakutenCaptchaSession.mockResolvedValue({
+    captchaImage: "data:image/png;base64,AQID",
+    expiresAt: "2026-09-27T08:02:00.000Z",
+    captchaLength: 4,
+    captchaKind: "alphanumeric",
+  });
+  mocks.syncRakuten.mockResolvedValue({
+    success: true,
+    connectorId: "rakuten",
+    scope: "all",
+    records: 2,
+    newRecords: {
+      invoices: 0,
+      bankTransactions: 0,
+      investmentTransactions: 0,
+    },
+    cursorUpdated: true,
   });
   mocks.prepareKgibankCaptchaSession.mockResolvedValue({
     captchaImage: "data:image/png;base64,AQID",
@@ -940,6 +976,88 @@ describe("Mega Bank sync routes", () => {
     );
     expect(invalid.status).toBe(400);
   });
+
+  it("dispatches the SMS verification code and rejects malformed codes", async () => {
+    const valid = await syncRoutes.request(
+      "/connectors/megabank/sync",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ otp: "654321" }),
+      },
+      env,
+    );
+    expect(valid.status).toBe(200);
+    expect(mocks.syncMegabank).toHaveBeenCalledWith(env, "manual", {
+      otp: "654321",
+    });
+    const invalid = await syncRoutes.request(
+      "/connectors/megabank/sync",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ otp: "12a456" }),
+      },
+      env,
+    );
+    expect(invalid.status).toBe(400);
+  });
+
+  it("maps SMS verification states without exposing the pending session", async () => {
+    const syntheticDevice = {
+      deviceCode: "synthetic-device-code",
+      deviceUKey: "synthetic-device-ukey",
+      deviceSeed: "synthetic-device-seed",
+    };
+    mocks.syncMegabank.mockRejectedValueOnce(
+      new MegabankOtpRequiredError(
+        "兆豐銀行已寄出簡訊驗證碼（簡訊檢核碼 AB12），請於三分鐘內輸入。",
+        "pending-session-secret",
+        "2026-01-01T00:03:00.000Z",
+        syntheticDevice,
+      ),
+    );
+    const required = await syncRoutes.request(
+      "/connectors/megabank/sync",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ captcha: "12345" }),
+      },
+      env,
+    );
+    expect(required.status).toBe(400);
+    const requiredBody = await required.text();
+    expect(JSON.parse(requiredBody)).toMatchObject({
+      error: {
+        code: "MEGABANK_SMS_OTP_REQUIRED",
+        message: expect.stringContaining("AB12"),
+      },
+    });
+    expect(requiredBody).not.toContain("pending-session-secret");
+
+    mocks.syncMegabank.mockRejectedValueOnce(
+      new MegabankOtpInvalidError(
+        "兆豐銀行簡訊驗證碼不正確，請重新輸入。",
+        "pending-session-secret",
+        "2026-01-01T00:03:00.000Z",
+        syntheticDevice,
+      ),
+    );
+    const invalid = await syncRoutes.request(
+      "/connectors/megabank/sync",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ otp: "654321" }),
+      },
+      env,
+    );
+    expect(invalid.status).toBe(400);
+    await expect(invalid.json()).resolves.toMatchObject({
+      error: { code: "MEGABANK_OTP_INVALID" },
+    });
+  });
 });
 
 describe("First Bank web sync routes", () => {
@@ -1070,6 +1188,7 @@ describe("shared Browser Run capacity responses", () => {
     ["hncb", mocks.prepareHncbCaptchaSession],
     ["kgibank", mocks.prepareKgibankCaptchaSession],
     ["firstbank", mocks.prepareFirstbankCaptchaSession],
+    ["rakuten", mocks.prepareRakutenCaptchaSession],
   ])(
     "maps %s CAPTCHA failures to BROWSER_BUSY",
     async (connectorId, prepare) => {
@@ -1089,4 +1208,110 @@ describe("shared Browser Run capacity responses", () => {
       });
     },
   );
+});
+
+describe("Rakuten sync routes", () => {
+  it("returns the manual CAPTCHA metadata", async () => {
+    const response = await syncRoutes.request(
+      "/connectors/rakuten/captcha",
+      { method: "POST" },
+      env,
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      captchaLength: 4,
+      captchaKind: "alphanumeric",
+      captchaImage: "data:image/png;base64,AQID",
+    });
+  });
+
+  it("accepts four alphanumeric characters and rejects malformed input", async () => {
+    const valid = await syncRoutes.request(
+      "/connectors/rakuten/sync",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ captcha: "36CY" }),
+      },
+      env,
+    );
+    expect(valid.status).toBe(200);
+    expect(mocks.syncRakuten).toHaveBeenCalledWith(env, "manual", {
+      captcha: "36CY",
+    });
+
+    const invalid = await syncRoutes.request(
+      "/connectors/rakuten/sync",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ captcha: "123" }),
+      },
+      env,
+    );
+    expect(invalid.status).toBe(400);
+    expect(mocks.syncRakuten).toHaveBeenCalledTimes(1);
+  });
+
+  it("maps Browser Rendering capacity and connection failures", async () => {
+    mocks.prepareRakutenCaptchaSession.mockRejectedValueOnce(
+      new RakutenBrowserCapacityError("browser busy", 12),
+    );
+    const busy = await syncRoutes.request(
+      "/connectors/rakuten/captcha",
+      { method: "POST" },
+      env,
+    );
+    expect(busy.status).toBe(429);
+    expect(busy.headers.get("Retry-After")).toBe("12");
+    await expect(busy.json()).resolves.toMatchObject({
+      error: { code: "RAKUTEN_BROWSER_BUSY" },
+    });
+
+    mocks.syncRakuten.mockRejectedValueOnce(
+      new RakutenConnectionError("system maintenance"),
+    );
+    const failed = await syncRoutes.request(
+      "/connectors/rakuten/sync",
+      { method: "POST" },
+      env,
+    );
+    expect(failed.status).toBe(502);
+    await expect(failed.json()).resolves.toMatchObject({
+      error: { code: "RAKUTEN_CONNECTION_FAILED" },
+    });
+  });
+
+  it("asks the client to switch to a manual CAPTCHA when automatic recognition fails", async () => {
+    mocks.syncRakuten.mockRejectedValueOnce(
+      new ManualCaptchaRequiredError(
+        "樂天驗證碼自動辨識連續失敗 3 次，請改用人工驗證。",
+      ),
+    );
+    const manual = await syncRoutes.request(
+      "/connectors/rakuten/sync",
+      { method: "POST" },
+      env,
+    );
+    expect(manual.status).toBe(400);
+    await expect(manual.json()).resolves.toMatchObject({
+      error: {
+        code: "MANUAL_CAPTCHA_REQUIRED",
+        message: "樂天驗證碼自動辨識連續失敗 3 次，請改用人工驗證。",
+      },
+    });
+
+    mocks.syncRakuten.mockRejectedValueOnce(
+      new NeedsUserActionError("樂天銀行身分證字號、使用者代號或密碼錯誤。"),
+    );
+    const other = await syncRoutes.request(
+      "/connectors/rakuten/sync",
+      { method: "POST" },
+      env,
+    );
+    await expect(other.json()).resolves.toMatchObject({
+      error: { code: "USER_ACTION_REQUIRED" },
+    });
+  });
 });

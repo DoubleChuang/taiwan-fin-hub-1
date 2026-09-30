@@ -17,6 +17,13 @@ export const megabankConfigSchema = z.object({
     .string()
     .regex(/^\d{5}$/)
     .optional(),
+  otp: z
+    .string()
+    .regex(/^\d{4,8}$/)
+    .optional(),
+  deviceCode: z.string().min(1).max(64).optional(),
+  deviceUKey: z.string().min(1).max(64).optional(),
+  deviceSeed: z.string().min(1).max(64).optional(),
 });
 
 export type MegabankConfig = z.infer<typeof megabankConfigSchema>;

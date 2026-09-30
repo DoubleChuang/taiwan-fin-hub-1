@@ -7,6 +7,7 @@ const SKBANK_BANK_CODE = "103";
 const OBANK_BANK_CODE = "048";
 const HNCB_BANK_CODE = "008";
 const KGIBANK_BANK_CODE = "809";
+const RAKUTEN_BANK_CODE = "826";
 const FIRSTBANK_BANK_CODE = "007";
 const MEGABANK_BANK_CODE = "017";
 const TAIWAN_BANK_NAMES: Record<string, string> = {
@@ -100,6 +101,10 @@ export function deriveBankMatchKey(
     const last4 = sourceId.split(":")[2]?.replace(/\D/g, "").slice(-4) ?? "";
     return { bankCode: MEGABANK_BANK_CODE, last4: last4 || null };
   }
+  if (connectorId === "rakuten" && sourceId.startsWith("bank:rakuten:")) {
+    const last4 = sourceId.split(":")[2]?.replace(/\D/g, "").slice(-4) ?? "";
+    return { bankCode: RAKUTEN_BANK_CODE, last4: last4 || null };
+  }
   const match = sourceId.match(/^settlement:([^:]+):([^:]+)/);
   const last4 = match?.[2]?.replace(/\D/g, "").slice(-4) ?? "";
   return match
@@ -143,7 +148,9 @@ function normalizeDepositDisplay<T extends BankDisplayRow>(row: T): T {
                     ? KGIBANK_BANK_CODE
                     : row.connectorId === "megabank"
                       ? MEGABANK_BANK_CODE
-                      : undefined);
+                      : row.connectorId === "rakuten"
+                        ? RAKUTEN_BANK_CODE
+                        : undefined);
   const accountSuffix = accountSuffixFromSourceId(sourceId);
   return {
     ...row,
@@ -185,6 +192,8 @@ function parseBankAccountSource(sourceId: string): {
   if (kgibank) return { bankCode: KGIBANK_BANK_CODE, account: kgibank[1] };
   const megabank = sourceId.match(/^bank:megabank:([^:]+)/);
   if (megabank) return { bankCode: MEGABANK_BANK_CODE, account: megabank[1] };
+  const rakuten = sourceId.match(/^bank:rakuten:([^:]+)/);
+  if (rakuten) return { bankCode: RAKUTEN_BANK_CODE, account: rakuten[1] };
   return {};
 }
 

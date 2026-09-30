@@ -5,6 +5,7 @@ import {
   prepareSinopacCaptchaSession,
   prepareHncbCaptchaSession,
   prepareKgibankCaptchaSession,
+  prepareRakutenCaptchaSession,
   prepareTaishinCaptchaSession,
   prepareObankCaptchaSession,
   prepareFirstbankCaptchaSession,
@@ -20,6 +21,7 @@ import {
   syncFirstbank,
   syncHncb,
   syncKgibank,
+  syncRakuten,
   syncTaishin,
   syncTdcc,
   syncMegabank,
@@ -34,6 +36,7 @@ import {
   type SyncScope,
   type HncbSyncOverrides,
   type KgibankSyncOverrides,
+  type RakutenSyncOverrides,
   type TaishinSyncOverrides,
   type TdccSyncOverrides,
   type CathaySyncOverrides,
@@ -112,6 +115,11 @@ export const connectorRuntimeRegistry: Record<
     run: (env, trigger, _scope, overrides) =>
       syncFirstbank(env, trigger, overrides as FirstbankSyncOverrides),
     prepareChallenge: prepareFirstbankCaptchaSession,
+  },
+  rakuten: {
+    run: (env, trigger, _scope, overrides) =>
+      syncRakuten(env, trigger, overrides as RakutenSyncOverrides),
+    prepareChallenge: prepareRakutenCaptchaSession,
   },
   kgibank: {
     run: (env, trigger, _scope, overrides) =>

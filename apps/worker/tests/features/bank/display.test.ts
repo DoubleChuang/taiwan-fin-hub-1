@@ -146,3 +146,29 @@ describe("First Bank display", () => {
     });
   });
 });
+
+describe("Rakuten bank display", () => {
+  it("derives bank code 826 from the deposit account", () => {
+    expect(
+      deriveBankMatchKey("rakuten", "bank:rakuten:0081200000001234:TWD"),
+    ).toEqual({
+      bankCode: "826",
+      last4: "1234",
+    });
+  });
+
+  it("normalizes a Rakuten deposit account to the bank name and account suffix", () => {
+    expect(
+      normalizeBankAccountDisplay({
+        connectorId: "rakuten",
+        sourceId: "bank:rakuten:0081200000001234:TWD",
+        institutionName: null,
+        accountName: "樂天活儲",
+        accountType: "savings",
+      }),
+    ).toMatchObject({
+      institutionName: "樂天銀行",
+      accountName: "末五碼 01234",
+    });
+  });
+});

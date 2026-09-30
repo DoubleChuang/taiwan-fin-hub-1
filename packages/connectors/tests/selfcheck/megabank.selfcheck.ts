@@ -14,6 +14,8 @@ import {
 import {
   createMegabankConnector,
   encryptLogin,
+  MegabankOtpInvalidError,
+  MegabankOtpRequiredError,
   MegabankProtocolError,
   MegabankVerificationRequiredError,
   prepareMegabankCaptcha,
@@ -268,7 +270,15 @@ let loginCode = "0000";
 let malformedResource: string | null = null;
 let resourceError: { resource: string; code: string } | undefined;
 let logoutHttpError = false;
+let loginGate: Record<string, unknown> = {};
+let otpVerified = false;
+let validateCodeResult: { code: string; success?: boolean } = {
+  code: "0000",
+  success: true,
+};
 const requests: string[] = [];
+const requestDeviceCodes: string[] = [];
+let noCards = false;
 const fetcher = async (
   input: RequestInfo | URL,
   init?: RequestInit,
@@ -287,8 +297,10 @@ const fetcher = async (
     const request = JSON.parse(body) as {
       resource: string;
       rqData: Record<string, unknown>;
+      deviceIxd: string;
     };
     requests.push(request.resource);
+    requestDeviceCodes.push(request.deviceIxd);
     if (request.resource.endsWith("/initialize")) {
       response = { code: "0000", rsData: {} };
     } else if (request.resource.endsWith("/captcha")) {
@@ -303,7 +315,18 @@ const fetcher = async (
       };
     } else if (request.resource.endsWith("/login")) {
       assert.equal(request.rqData.captchaCode, "12345");
-      response = { code: loginCode, rsData: {} };
+      otpVerified = false;
+      response = { code: loginCode, rsData: { ...loginGate } };
+    } else if (request.resource === "/fco/fco00001/getverifycode") {
+      assert.equal(request.rqData.type, "sms");
+      response = { code: "0000", rsData: { checkCode: "AB12" } };
+    } else if (request.resource === "/fco/fco00001/validatecode") {
+      assert.equal(request.rqData.code, "654321");
+      otpVerified = validateCodeResult.success === true;
+      response = {
+        code: validateCodeResult.code,
+        rsData: { success: validateCodeResult.success },
+      };
     } else if (request.resource === "/fco/fco02011/logout") {
       response = { code: "0000" };
       if (logoutHttpError) {
@@ -311,9 +334,17 @@ const fetcher = async (
       }
     } else if (request.resource === "/fco/fco10001/home") {
       response =
-        resourceError?.resource === request.resource
-          ? { code: resourceError.code }
-          : { code: "0000", ...(payloads.deposits as object) };
+        loginGate.isHighIpFar === true && !otpVerified
+          ? { code: "SYS014", desc: "權限不足" }
+          : resourceError?.resource === request.resource
+            ? { code: resourceError.code }
+            : { code: "0000", ...(payloads.deposits as object) };
+    } else if (request.resource === "/fco/fco10007/home" && noCards) {
+      response = { code: "0000", rsData: { creditCardBillInfoList: [] } };
+    } else if (noCards && request.resource.startsWith("/fao/fao0101")) {
+      response = { code: "1120", rsData: {} };
+    } else if (request.resource === "/fao/fao01009/home" && noCards) {
+      response = { code: "1120", rsData: {} };
     } else if (request.resource === "/fco/fco10007/home") {
       response =
         malformedResource === request.resource
@@ -437,4 +468,222 @@ assert.equal(
   requests.filter((resource) => resource === "/fco/fco02011/logout").length,
   logoutCountBeforeResourceFailure + 1,
 );
+resourceError = undefined;
+
+// 異地登入：只有允許寄簡訊的手動同步會請銀行寄驗證碼，並保留已登入工作階段。
+const logoutCount = () =>
+  requests.filter((resource) => resource === "/fco/fco02011/logout").length;
+const freshSync = () => ({
+  ...credentials,
+  pendingSession: challenge.pendingSession,
+  pendingSessionExpiresAt: challenge.pendingSessionExpiresAt,
+  captcha: "12345",
+});
+loginGate = { secondFactorFlag: "N", isHighIpFar: true, resultType: "3" };
+let logoutsBefore = logoutCount();
+await assert.rejects(connector.sync(freshSync()), (error: unknown) => {
+  assert.ok(error instanceof MegabankVerificationRequiredError);
+  assert.equal(error instanceof MegabankOtpRequiredError, false);
+  return true;
+});
+assert.equal(requests.includes("/fco/fco00001/getverifycode"), false);
+assert.equal(logoutCount(), logoutsBefore + 1);
+
+const otpConnector = createMegabankConnector(fetcher, undefined, {
+  allowOtpRequest: true,
+});
+logoutsBefore = logoutCount();
+let otpRequired: MegabankOtpRequiredError | undefined;
+await assert.rejects(otpConnector.sync(freshSync()), (error: unknown) => {
+  assert.ok(error instanceof MegabankOtpRequiredError);
+  otpRequired = error;
+  return true;
+});
+assert.ok(otpRequired);
+assert.match(otpRequired.message, /簡訊檢核碼 AB12/);
+assert.equal(otpRequired.message.includes(credentials.password), false);
+assert.equal(JSON.parse(otpRequired.pendingSession).authenticated, true);
+// 錯誤要帶出待驗證登入所用的虛擬裝置，service 才能保存。
+const requiredSessionState = JSON.parse(otpRequired.pendingSession);
+assert.deepEqual(otpRequired.device, {
+  deviceCode: requiredSessionState.deviceCode,
+  deviceUKey: requiredSessionState.deviceUKey,
+  deviceSeed: requiredSessionState.seed,
+});
+assert.ok(otpRequired.device.deviceCode);
+assert.ok(Date.parse(otpRequired.pendingSessionExpiresAt) > Date.now());
+assert.equal(logoutCount(), logoutsBefore, "等待簡訊驗證碼時不得登出");
+
+// 驗證碼錯誤：保留工作階段讓使用者重新輸入，不登出。
+validateCodeResult = { code: "0000", success: false };
+let otpInvalid: MegabankOtpInvalidError | undefined;
+await assert.rejects(
+  otpConnector.sync({
+    ...credentials,
+    pendingSession: otpRequired.pendingSession,
+    pendingSessionExpiresAt: otpRequired.pendingSessionExpiresAt,
+    otp: "654321",
+  }),
+  (error: unknown) => {
+    assert.ok(error instanceof MegabankOtpInvalidError);
+    otpInvalid = error;
+    return true;
+  },
+);
+assert.ok(otpInvalid);
+assert.equal(
+  otpInvalid.pendingSessionExpiresAt,
+  otpRequired.pendingSessionExpiresAt,
+);
+assert.deepEqual(otpInvalid.device, otpRequired.device);
+assert.equal(logoutCount(), logoutsBefore);
+
+// 驗證碼正確：接續同一個登入抓資料，結束後登出。
+validateCodeResult = { code: "0000", success: true };
+const verifiedResult = await otpConnector.sync({
+  ...credentials,
+  pendingSession: otpInvalid.pendingSession,
+  pendingSessionExpiresAt: otpInvalid.pendingSessionExpiresAt,
+  otp: "654321",
+});
+assert.equal(verifiedResult.bankAccounts?.length, 2);
+assert.equal(requests.at(-1), "/fco/fco02011/logout");
+assert.equal(logoutCount(), logoutsBefore + 1);
+
+// 銀行回非 0000：結束這次驗證並登出，需重新取得圖形驗證碼。
+validateCodeResult = { code: "9999" };
+logoutsBefore = logoutCount();
+await assert.rejects(
+  otpConnector.sync({
+    ...credentials,
+    pendingSession: otpRequired.pendingSession,
+    pendingSessionExpiresAt: otpRequired.pendingSessionExpiresAt,
+    otp: "654321",
+  }),
+  (error: unknown) => {
+    assert.ok(error instanceof MegabankVerificationRequiredError);
+    assert.equal(error instanceof MegabankOtpInvalidError, false);
+    return true;
+  },
+);
+assert.equal(logoutCount(), logoutsBefore + 1);
+
+// 等待驗證碼的工作階段逾時：盡力登出並要求重新開始。
+logoutsBefore = logoutCount();
+await assert.rejects(
+  otpConnector.sync({
+    ...credentials,
+    pendingSession: otpRequired.pendingSession,
+    pendingSessionExpiresAt: new Date(Date.now() - 1000).toISOString(),
+    otp: "654321",
+  }),
+  /逾時/,
+);
+assert.equal(logoutCount(), logoutsBefore + 1);
+
+// 雙重驗證（secondFactorFlag=Y）不支援：登出並中止，不寄簡訊。
+loginGate = { secondFactorFlag: "Y", isHighIpFar: true };
+logoutsBefore = logoutCount();
+const verifyCodeRequests = requests.filter(
+  (resource) => resource === "/fco/fco00001/getverifycode",
+).length;
+await assert.rejects(otpConnector.sync(freshSync()), /雙重驗證/);
+assert.equal(logoutCount(), logoutsBefore + 1);
+assert.equal(
+  requests.filter((resource) => resource === "/fco/fco00001/getverifycode")
+    .length,
+  verifyCodeRequests,
+);
+loginGate = {};
+
+// 回歸：上一輪留下的已登入待驗證工作階段（沒有輸入簡訊驗證碼）不得當成圖形驗證碼
+// session 重用；要先登出，再重新取得圖形驗證碼（有辨識器時自動辨識）並正常登入。
+const recognizingConnector = createMegabankConnector(
+  fetcher,
+  async () => "12345",
+  { allowOtpRequest: true },
+);
+assert.equal(
+  JSON.parse(otpRequired.pendingSession).authenticated,
+  true,
+  "前置條件：待驗證工作階段仍是已登入狀態",
+);
+assert.ok(Date.parse(otpRequired.pendingSessionExpiresAt) > Date.now());
+const staleRequestStart = requests.length;
+logoutsBefore = logoutCount();
+const staleResult = await recognizingConnector.sync({
+  ...credentials,
+  pendingSession: otpRequired.pendingSession,
+  pendingSessionExpiresAt: otpRequired.pendingSessionExpiresAt,
+});
+assert.equal(staleResult.bankAccounts?.length, 2);
+const staleRequests = requests.slice(staleRequestStart);
+const staleLogoutIndex = staleRequests.indexOf("/fco/fco02011/logout");
+const staleCaptchaIndex = staleRequests.indexOf("/fco/fco00001/captcha");
+assert.ok(staleLogoutIndex >= 0, "舊的已登入工作階段必須先登出");
+assert.ok(staleCaptchaIndex >= 0, "必須重新取得圖形驗證碼");
+assert.ok(
+  staleLogoutIndex < staleCaptchaIndex,
+  "先登出舊工作階段再取圖形驗證碼",
+);
+assert.equal(
+  staleRequests.filter((resource) => resource === "/fco/fco00001/captcha")
+    .length,
+  1,
+);
+assert.equal(logoutCount(), logoutsBefore + 2, "舊工作階段與新登入各登出一次");
+assert.equal(requests.at(-1), "/fco/fco02011/logout");
+
+// 已保存的虛擬裝置：取得驗證碼與後續登入都沿用同一組識別。
+assert.ok(challenge.device.deviceCode);
+assert.equal(
+  JSON.parse(challenge.pendingSession).deviceCode,
+  challenge.device.deviceCode,
+);
+const savedDevice = {
+  deviceCode: "synthetic-device-code",
+  deviceUKey: "synthetic-device-ukey",
+  deviceSeed: "synthetic-device-seed",
+};
+const deviceChallenge = await prepareMegabankCaptcha(
+  { ...credentials, ...savedDevice },
+  fetcher,
+);
+assert.deepEqual(deviceChallenge.device, savedDevice);
+const deviceSession = JSON.parse(deviceChallenge.pendingSession);
+assert.equal(deviceSession.deviceCode, savedDevice.deviceCode);
+assert.equal(deviceSession.deviceUKey, savedDevice.deviceUKey);
+assert.equal(deviceSession.seed, savedDevice.deviceSeed);
+requestDeviceCodes.length = 0;
+await connector.sync({
+  ...credentials,
+  ...savedDevice,
+  pendingSession: deviceChallenge.pendingSession,
+  pendingSessionExpiresAt: deviceChallenge.pendingSessionExpiresAt,
+  captcha: "12345",
+});
+assert.ok(requestDeviceCodes.length > 0);
+assert.ok(requestDeviceCodes.every((code) => code === savedDevice.deviceCode));
+assert.notEqual(challenge.device.deviceCode, savedDevice.deviceCode);
+
+// 沒有信用卡：總覽為空時不查帳單與卡片，只同步存款。
+noCards = true;
+requests.length = 0;
+const noCardResult = await connector.sync(freshSync());
+assert.equal(noCardResult.creditCardBills?.length ?? 0, 0);
+assert.ok(
+  (noCardResult.bankAccounts ?? []).every(
+    (account) => account.accountType !== "credit",
+  ),
+);
+assert.ok((noCardResult.bankAccounts ?? []).length > 0);
+assert.equal(
+  requests.some((resource) => resource.startsWith("/fao/fao0100")),
+  true,
+  "存款交易仍需查詢",
+);
+assert.equal(requests.includes("/fao/fao01009/home"), false);
+assert.equal(requests.includes("/fao/fao01010/home"), false);
+assert.equal(requests.includes("/fao/fao01010/query"), false);
+noCards = false;
 console.log("megabank selfcheck passed");

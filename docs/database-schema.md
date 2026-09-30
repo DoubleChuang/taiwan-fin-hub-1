@@ -11,7 +11,7 @@
 - Tables：31
 - Explicit indexes：44
 - Other objects：0
-- Migrations：48
+- Migrations：49
 
 ## Tables
 
@@ -1682,6 +1682,7 @@ Migration 是 schema 演進的 source of truth；若要了解某欄位的變更�
 - [`0048_kgibank_sync_job.sql`](../packages/db/migrations/0048_kgibank_sync_job.sql)
 - [`0049_megabank_sync_job.sql`](../packages/db/migrations/0049_megabank_sync_job.sql)
 - [`0050_nextbank_sync_job.sql`](../packages/db/migrations/0050_nextbank_sync_job.sql)
+- [`0051_rakuten_sync_job.sql`](../packages/db/migrations/0051_rakuten_sync_job.sql)
 
 ## 程式碼導覽
 

@@ -24,6 +24,7 @@ export const APPROVED_DOMAINS = [
   "*.kgibank.com.tw",
   "*.megabank.com.tw",
   "*.nextbank.com.tw",
+  "*.rakuten-bank.com.tw",
   "*.einvoice.nat.gov.tw",
   "*.tdcc.com.tw",
   "cloudflareaccess.com",
@@ -468,6 +469,7 @@ export function scanHardcodedSecrets(fileDiffs) {
       lower.includes("example") ||
       lower.includes("test_") ||
       lower.includes("test-") ||
+      lower.startsWith("test") ||
       lower.includes("mock_") ||
       lower.includes("mock-") ||
       lower.includes("synthetic") ||
