@@ -174,8 +174,7 @@ export function scanDataExfiltration(fileDiffs) {
     if (
       file.filePath.endsWith(".md") ||
       file.filePath.endsWith(".txt") ||
-      file.filePath.endsWith("scripts/review-pr-security.mjs") ||
-      file.filePath.startsWith("deploy/taiwan-relay/")
+      file.filePath.endsWith("scripts/review-pr-security.mjs")
     ) {
       continue;
     }

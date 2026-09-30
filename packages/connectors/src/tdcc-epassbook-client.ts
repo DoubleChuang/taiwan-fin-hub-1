@@ -77,7 +77,6 @@ export type EPassbookClientOptions = {
   devType: string;
   devModel: string;
   session?: EPassbookSession;
-  fetcher?: typeof fetch;
 };
 
 function bytesToBase64(bytes: Uint8Array): string {
@@ -141,7 +140,6 @@ export class EPassbookClient {
   private readonly devId: string;
   private readonly devType: string;
   private readonly devModel: string;
-  private readonly fetcher: typeof fetch;
 
   constructor(options: EPassbookClientOptions) {
     this.devId = options.devId;
@@ -149,7 +147,6 @@ export class EPassbookClient {
     this.devModel = options.devModel;
     this.tokenId = options.session?.tokenId ?? null;
     this.richUrl = options.session?.richUrl ?? null;
-    this.fetcher = options.fetcher ?? globalThis.fetch.bind(globalThis);
   }
 
   exportSession(): EPassbookSession {
@@ -186,7 +183,7 @@ export class EPassbookClient {
       tokenID: this.tokenId,
     };
 
-    const response = await this.fetcher(`${BASE_URL}${endpoint}`, {
+    const response = await fetch(`${BASE_URL}${endpoint}`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json; charset=utf-8",
@@ -328,7 +325,7 @@ export class EPassbookClient {
       ? this.richUrl.slice(this.richUrl.indexOf("?"))
       : "";
     const url = `${BASE_URL}TR087${qs}&type=${type}`;
-    const response = await this.fetcher(url, {
+    const response = await fetch(url, {
       headers: {
         Referer: "https://digitalprocesssys-epassbook.cdn.hinet.net/",
         "User-Agent": "okhttp/4.9.3",

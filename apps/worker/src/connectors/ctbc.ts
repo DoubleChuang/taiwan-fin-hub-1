@@ -3,30 +3,21 @@ import {
   type CtbcFetch,
 } from "@taiwan-fin-hub/connectors";
 import type { Env } from "../platform/env";
-import { createRelayFetch } from "./relay-fetch";
 
 type RelayFetch = typeof globalThis.fetch;
 
 /**
  * Local workerd cannot negotiate CTBC's TLS endpoint even though production
  * Workers can. `npm run dev` starts a loopback-only Node relay and injects its
- * one-time URL/token. Production and remote dev continue to fetch CTBC direct,
- * unless a global Taiwan HTTP relay is configured via RELAY_HTTP_URL/TOKEN.
+ * one-time URL/token. Production and remote dev continue to fetch CTBC direct.
  */
 export function createCtbcFetch(
   env: Pick<
     Env,
-    | "LOCAL_DEV_MODE"
-    | "CTBC_API_RELAY_URL"
-    | "CTBC_API_RELAY_TOKEN"
-    | "RELAY_HTTP_URL"
-    | "RELAY_HTTP_TOKEN"
+    "LOCAL_DEV_MODE" | "CTBC_API_RELAY_URL" | "CTBC_API_RELAY_TOKEN"
   >,
   relayFetch: RelayFetch = globalThis.fetch.bind(globalThis),
 ): CtbcFetch | undefined {
-  if (env.RELAY_HTTP_URL && env.RELAY_HTTP_TOKEN) {
-    return createRelayFetch(env, relayFetch);
-  }
   if (!isLocalDev(env.LOCAL_DEV_MODE)) return undefined;
   const relayUrl = env.CTBC_API_RELAY_URL?.trim();
   const relayToken = env.CTBC_API_RELAY_TOKEN?.trim();

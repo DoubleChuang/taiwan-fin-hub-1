@@ -24,7 +24,6 @@ import type {
   SyncNotificationStatus,
 } from "@taiwan-fin-hub/core";
 import { getConnectorSettings, nextSyncRunAt } from "@taiwan-fin-hub/db";
-import { createRelayFetch } from "../../connectors/relay-fetch";
 import { configEncryptionKey } from "../../platform/config";
 import { decryptJson, encryptJson } from "../../platform/crypto";
 import type { Env } from "../../platform/env";
@@ -305,11 +304,9 @@ async function initializeTdccRun(
     if (current?.status !== "initializing") return;
   }
 
-  const relayFetch = createRelayFetch(env);
   const initialized = await initializeTdccSnapshot(
     config,
     persistedCursor ?? undefined,
-    relayFetch,
   );
   const now = new Date().toISOString();
   const cursor = JSON.stringify({
@@ -344,11 +341,9 @@ async function processTdccRunItem(
     throw new NeedsUserActionError("集保登入狀態已失效，請重新驗證。");
   }
   const cursor = JSON.stringify(sessionState);
-  const relayFetch = createRelayFetch(env);
   const clientState = createTdccClient(
     { ...config, session: sessionState.session },
     cursor,
-    relayFetch,
   );
   await ensureTdccSession(clientState.client, {
     ...config,
