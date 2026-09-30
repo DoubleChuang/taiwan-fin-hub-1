@@ -17,7 +17,15 @@
     onRefresh,
   }: {
     bankName:
-      "永豐" | "台新" | "王道" | "華南" | "第一銀行" | "凱基" | "兆豐" | "將來";
+      | "永豐"
+      | "台新"
+      | "王道"
+      | "華南"
+      | "第一銀行"
+      | "凱基"
+      | "兆豐"
+      | "將來"
+      | "樂天";
     captchaImage: string;
     captcha?: string;
     digitCount: number;

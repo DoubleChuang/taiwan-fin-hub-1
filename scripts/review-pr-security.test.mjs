@@ -33,6 +33,8 @@ test("isApprovedDomain: 正確辨識核准之台灣金融機構與官方 API 網
   assert.equal(isApprovedDomain("megabank.com.tw"), true);
   assert.equal(isApprovedDomain("api.nextbank.com.tw"), true);
   assert.equal(isApprovedDomain("nextbank.com.tw"), true);
+  assert.equal(isApprovedDomain("www.rakuten-bank.com.tw"), true);
+  assert.equal(isApprovedDomain("rakuten-bank.com.tw"), true);
   assert.equal(isApprovedDomain("uia.einvoice.nat.gov.tw"), true);
   assert.equal(isApprovedDomain("epassbooksys.tdcc.com.tw"), true);
   assert.equal(isApprovedDomain("cloudflareaccess.com"), true);

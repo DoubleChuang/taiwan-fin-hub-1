@@ -16,6 +16,7 @@ import { BANK_SYNC_MONTHS } from "./sync-window";
 const ROOT = "https://mobile.megabank.com.tw/ixtein";
 const REQUEST_TIMEOUT_MS = 45_000;
 const PENDING_SESSION_TTL_MS = 2 * 60_000;
+const OTP_SESSION_TTL_MS = 3 * 60_000;
 const MAX_TRANSACTION_PAGES = 20;
 type JsonRecord = Record<string, unknown>;
 type Fetcher = (
@@ -27,6 +28,7 @@ type Credentials = Required<
 >;
 type SessionState = {
   version: 1;
+  authenticated?: boolean;
   accessToken: string;
   xAuthToken: string;
   cookies: Record<string, string>;
@@ -37,18 +39,53 @@ type SessionState = {
   clientNo: string;
 };
 
+/** 固定的虛擬裝置識別；沿用同一組讓銀行把簡訊驗證過的裝置視為同一台。 */
+export type MegabankDevice = {
+  deviceCode: string;
+  deviceUKey: string;
+  deviceSeed: string;
+};
+
 export type MegabankCaptchaChallenge = {
   captchaImage: string;
   contentType: string;
   imageBytes: ArrayBuffer;
   pendingSession: string;
   pendingSessionExpiresAt: string;
+  device: MegabankDevice;
 };
 
 export class MegabankVerificationRequiredError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "MegabankVerificationRequiredError";
+  }
+}
+/**
+ * 登入後銀行判定為異地登入，已寄出簡訊驗證碼；帶著已登入的工作階段，
+ * 讓使用者輸入驗證碼後接續同一次登入。工作階段只供這一次驗證使用。
+ */
+export class MegabankOtpRequiredError extends MegabankVerificationRequiredError {
+  constructor(
+    message: string,
+    readonly pendingSession: string,
+    readonly pendingSessionExpiresAt: string,
+    /** 待驗證登入所用的虛擬裝置；自動辨識驗證碼路徑也要保存，簡訊驗證才只需一次。 */
+    readonly device: MegabankDevice,
+  ) {
+    super(message);
+    this.name = "MegabankOtpRequiredError";
+  }
+}
+export class MegabankOtpInvalidError extends MegabankVerificationRequiredError {
+  constructor(
+    message: string,
+    readonly pendingSession: string,
+    readonly pendingSessionExpiresAt: string,
+    readonly device: MegabankDevice,
+  ) {
+    super(message);
+    this.name = "MegabankOtpInvalidError";
   }
 }
 export class MegabankConnectionError extends Error {
@@ -84,7 +121,7 @@ export async function prepareMegabankCaptcha(
   fetcher: Fetcher = globalThis.fetch.bind(globalThis),
 ): Promise<MegabankCaptchaChallenge> {
   requireMegabankCredentials(config);
-  const session = new MegabankSession(fetcher);
+  const session = new MegabankSession(fetcher, megabankDevice(config));
   await session.bootstrap();
   const image = await session.resource(
     "prelogin",
@@ -111,7 +148,18 @@ export async function prepareMegabankCaptcha(
     pendingSessionExpiresAt: new Date(
       Date.now() + PENDING_SESSION_TTL_MS,
     ).toISOString(),
+    device: session.device(),
   };
+}
+
+function megabankDevice(config: MegabankConfig): MegabankDevice | undefined {
+  return config.deviceCode && config.deviceUKey && config.deviceSeed
+    ? {
+        deviceCode: config.deviceCode,
+        deviceUKey: config.deviceUKey,
+        deviceSeed: config.deviceSeed,
+      }
+    : undefined;
 }
 
 export function createMegabankConnector(
@@ -120,6 +168,7 @@ export function createMegabankConnector(
     bytes: ArrayBuffer,
     contentType: string,
   ) => Promise<string>,
+  options: { allowOtpRequest?: boolean } = {},
 ) {
   return {
     id: "megabank" as const,
@@ -129,14 +178,29 @@ export function createMegabankConnector(
       _cursor?: string,
     ): Promise<SyncResult<never>> {
       const credentials = requireMegabankCredentials(config);
+      const pending = restorePendingSession(config, fetcher);
+      if (config.otp) {
+        if (!pending?.session.isAuthenticated() || !pending.active) {
+          await pending?.session.logout();
+          throw new MegabankVerificationRequiredError(
+            "兆豐銀行簡訊驗證已逾時，請重新取得圖形驗證碼。",
+          );
+        }
+        return completeVerifiedSync(
+          pending.session,
+          config.otp,
+          pending.expiresAt,
+        );
+      }
+      // 上一輪等待簡訊驗證碼的登入沒有完成時，先釋放再重新登入；logout 會清掉登入狀態，
+      // 所以要先記下原本是否已登入，已登入過的工作階段不能再當成驗證碼 session 重用。
+      const pendingWasAuthenticated =
+        pending?.session.isAuthenticated() ?? false;
+      if (pendingWasAuthenticated) await pending?.session.logout();
       let session: MegabankSession;
       let captcha = config.captcha;
-      if (
-        config.pendingSession &&
-        config.pendingSessionExpiresAt &&
-        Date.parse(config.pendingSessionExpiresAt) > Date.now()
-      ) {
-        session = MegabankSession.deserialize(config.pendingSession, fetcher);
+      if (pending?.active && !pendingWasAuthenticated) {
+        session = pending.session;
       } else {
         const challenge = await prepareMegabankCaptcha(config, fetcher);
         if (!recognizeCaptcha) {
@@ -158,167 +222,222 @@ export function createMegabankConnector(
           "請輸入兆豐銀行圖片中的五位數字驗證碼。",
         );
       }
+      let keepSession = false;
       try {
-        await session.login(credentials, captcha);
-        const deposits = await session.resource(
-          "megapmb",
-          "/fco/fco10001/home",
-          { type: "1", refresh: true },
-          "fco10001",
-          "home",
-        );
-        if (!Array.isArray(dataAt(deposits).depositInfoList)) {
-          throw new MegabankProtocolError(
-            "兆豐存款清單格式已變更，未更新資料。",
+        const gate = await session.login(credentials, captcha);
+        if (gate.requiresTwoFactor) {
+          throw new MegabankVerificationRequiredError(
+            "兆豐銀行要求雙重驗證，連接器尚未支援，請改用官方 App 查詢。",
           );
         }
-        const cardOverview = await session.resource(
-          "megapmb",
-          "/fco/fco10007/home",
-          {},
-          "fco10007",
-          "home",
-        );
-        if (!Array.isArray(dataAt(cardOverview).creditCardBillInfoList)) {
-          throw new MegabankProtocolError(
-            "兆豐信用卡總覽格式已變更，未更新資料。",
-          );
-        }
-        const cardBills = await session.resource(
-          "megapmb",
-          "/fao/fao01009/home",
-          {},
-          "fao01009",
-          "home",
-        );
-        const billData = dataAt(cardBills);
-        if (
-          !["generalRecordList", "fancyRecordList", "ridoRecordList"].some(
-            (key) => Array.isArray(billData[key]),
-          )
-        ) {
-          throw new MegabankProtocolError(
-            "兆豐信用卡帳單格式已變更，未更新資料。",
-          );
-        }
-        const cardHome = await session.resource(
-          "megapmb",
-          "/fao/fao01010/home",
-          {},
-          "fao01010",
-          "home",
-        );
-        if (!Array.isArray(dataAt(cardHome).cardNumbers)) {
-          throw new MegabankProtocolError(
-            "兆豐信用卡清單格式已變更，未更新資料。",
-          );
-        }
-        const start = new Date();
-        start.setMonth(start.getMonth() - BANK_SYNC_MONTHS);
-        const startDate = localDate(start);
-        const endDate = localDate(new Date());
-        const cardNumbers = arrayAt(dataAt(cardHome), "cardNumbers");
-        const cardTransactions =
-          cardNumbers.length > 0
-            ? await session.resource(
-                "megapmb",
-                "/fao/fao01010/query",
-                { cardNo: "0", flag: "0", startDate, endDate },
-                "fao01010",
-                "query",
-              )
-            : { rsData: { detailList: [] } };
-        const cardTransactionData = dataAt(cardTransactions);
-        if (!Array.isArray(cardTransactionData.detailList)) {
-          throw new MegabankProtocolError(
-            "兆豐信用卡消費明細格式已變更，未更新資料。",
-          );
-        }
-        const depositTransactions: MegabankPayloads["depositTransactions"] = [];
-        const queriedAccounts = new Set<string>();
-        for (const item of arrayAt(dataAt(deposits), "depositInfoList")) {
-          if (!isRecord(item)) continue;
-          const accountNo = stringAt(item, "DRACT");
-          const currency = stringAt(item, "DRCUR");
-          if (
-            !accountNo ||
-            currency !== "TWD" ||
-            queriedAccounts.has(accountNo)
-          )
-            continue;
-          queriedAccounts.add(accountNo);
-          let tsqName = "";
-          for (let page = 0; page < MAX_TRANSACTION_PAGES; page += 1) {
-            const response = await session.resource(
-              "megapmb",
-              "/fao/fao01001/query",
-              {
-                currency,
-                accountNo,
-                accountTitle: "",
-                startDate,
-                endDate,
-                count: "20",
-                isDw: false,
-                tsqName,
-                isReturn: false,
-              },
-              "fao01001",
-              "query",
+        if (gate.highIpFar) {
+          if (!options.allowOtpRequest) {
+            throw new MegabankVerificationRequiredError(
+              "兆豐銀行要求簡訊驗證，請改用手動同步並輸入簡訊驗證碼。",
             );
-            depositTransactions.push({ accountNo, currency, response });
-            const next = stringAt(dataAt(response), "tsqName");
-            if (!next || next === tsqName) break;
-            if (page === MAX_TRANSACTION_PAGES - 1) {
-              throw new MegabankProtocolError(
-                "兆豐存款交易分頁超過安全上限，未更新資料。",
-              );
-            }
-            tsqName = next;
           }
-        }
-        let parsed;
-        try {
-          parsed = parseMegabankData({
-            deposits,
-            depositTransactions,
-            cardOverview,
-            cardBills,
-            cardHome,
-            cardTransactions,
-          });
-        } catch {
-          throw new MegabankProtocolError(
-            "兆豐銀行帳務欄位無法完整辨識，未更新資料。",
+          const checkCode = await session.requestVerifyCode("sms");
+          keepSession = true;
+          throw new MegabankOtpRequiredError(
+            `兆豐銀行已寄出簡訊驗證碼${checkCode ? `（簡訊檢核碼 ${checkCode}）` : ""}，請於三分鐘內輸入。`,
+            session.serialize(),
+            new Date(Date.now() + OTP_SESSION_TTL_MS).toISOString(),
+            session.device(),
           );
         }
-        if (
-          arrayAt(dataAt(deposits), "depositInfoList").length > 0 &&
-          parsed.bankAccounts.every(
-            (account) => account.accountType === "credit",
-          )
-        ) {
-          throw new MegabankProtocolError("兆豐存款資料無法辨識，未更新資料。");
-        }
-        if (
-          cardNumbers.length > 0 &&
-          parsed.bankAccounts.every(
-            (account) => account.accountType !== "credit",
-          )
-        ) {
-          throw new MegabankProtocolError(
-            "兆豐信用卡資料無法辨識，未更新資料。",
-          );
-        }
-        return {
-          records: [],
-          ...parsed,
-          cursor: JSON.stringify({ syncedAt: new Date().toISOString() }),
-        };
+        return await fetchMegabankData(session);
       } finally {
-        await session.logout();
+        if (!keepSession) await session.logout();
       }
     },
+  };
+}
+
+function restorePendingSession(config: MegabankConfig, fetcher: Fetcher) {
+  if (!config.pendingSession) return undefined;
+  const expiresAt = config.pendingSessionExpiresAt ?? "";
+  const active = Date.parse(expiresAt) > Date.now();
+  try {
+    return {
+      session: MegabankSession.deserialize(config.pendingSession, fetcher),
+      expiresAt,
+      active,
+    };
+  } catch (error) {
+    if (active) throw error;
+    return undefined;
+  }
+}
+
+async function completeVerifiedSync(
+  session: MegabankSession,
+  otp: string,
+  expiresAt: string,
+): Promise<SyncResult<never>> {
+  let keepSession = false;
+  try {
+    if (!(await session.validateVerifyCode(otp))) {
+      keepSession = true;
+      throw new MegabankOtpInvalidError(
+        "兆豐銀行簡訊驗證碼不正確，請重新輸入。",
+        session.serialize(),
+        expiresAt,
+        session.device(),
+      );
+    }
+    return await fetchMegabankData(session);
+  } finally {
+    if (!keepSession) await session.logout();
+  }
+}
+
+async function fetchMegabankData(
+  session: MegabankSession,
+): Promise<SyncResult<never>> {
+  const deposits = await session.resource(
+    "megapmb",
+    "/fco/fco10001/home",
+    { type: "1", refresh: true },
+    "fco10001",
+    "home",
+  );
+  if (!Array.isArray(dataAt(deposits).depositInfoList)) {
+    throw new MegabankProtocolError("兆豐存款清單格式已變更，未更新資料。");
+  }
+  const cardOverview = await session.resource(
+    "megapmb",
+    "/fco/fco10007/home",
+    {},
+    "fco10007",
+    "home",
+  );
+  if (!Array.isArray(dataAt(cardOverview).creditCardBillInfoList)) {
+    throw new MegabankProtocolError("兆豐信用卡總覽格式已變更，未更新資料。");
+  }
+  // 總覽沒有任何卡片即視為無信用卡：無卡帳號的帳單與卡片清單可能不含這些欄位，只同步存款。
+  const hasCards =
+    arrayAt(dataAt(cardOverview), "creditCardBillInfoList").length > 0;
+  const cardBills = hasCards
+    ? await session.resource(
+        "megapmb",
+        "/fao/fao01009/home",
+        {},
+        "fao01009",
+        "home",
+      )
+    : { rsData: {} };
+  const billData = dataAt(cardBills);
+  if (
+    hasCards &&
+    !["generalRecordList", "fancyRecordList", "ridoRecordList"].some((key) =>
+      Array.isArray(billData[key]),
+    )
+  ) {
+    throw new MegabankProtocolError("兆豐信用卡帳單格式已變更，未更新資料。");
+  }
+  const cardHome = hasCards
+    ? await session.resource(
+        "megapmb",
+        "/fao/fao01010/home",
+        {},
+        "fao01010",
+        "home",
+      )
+    : { rsData: { cardNumbers: [] } };
+  if (!Array.isArray(dataAt(cardHome).cardNumbers)) {
+    throw new MegabankProtocolError("兆豐信用卡清單格式已變更，未更新資料。");
+  }
+  const start = new Date();
+  start.setMonth(start.getMonth() - BANK_SYNC_MONTHS);
+  const startDate = localDate(start);
+  const endDate = localDate(new Date());
+  const cardNumbers = arrayAt(dataAt(cardHome), "cardNumbers");
+  const cardTransactions =
+    cardNumbers.length > 0
+      ? await session.resource(
+          "megapmb",
+          "/fao/fao01010/query",
+          { cardNo: "0", flag: "0", startDate, endDate },
+          "fao01010",
+          "query",
+        )
+      : { rsData: { detailList: [] } };
+  const cardTransactionData = dataAt(cardTransactions);
+  if (!Array.isArray(cardTransactionData.detailList)) {
+    throw new MegabankProtocolError(
+      "兆豐信用卡消費明細格式已變更，未更新資料。",
+    );
+  }
+  const depositTransactions: MegabankPayloads["depositTransactions"] = [];
+  const queriedAccounts = new Set<string>();
+  for (const item of arrayAt(dataAt(deposits), "depositInfoList")) {
+    if (!isRecord(item)) continue;
+    const accountNo = stringAt(item, "DRACT");
+    const currency = stringAt(item, "DRCUR");
+    if (!accountNo || currency !== "TWD" || queriedAccounts.has(accountNo))
+      continue;
+    queriedAccounts.add(accountNo);
+    let tsqName = "";
+    for (let page = 0; page < MAX_TRANSACTION_PAGES; page += 1) {
+      const response = await session.resource(
+        "megapmb",
+        "/fao/fao01001/query",
+        {
+          currency,
+          accountNo,
+          accountTitle: "",
+          startDate,
+          endDate,
+          count: "20",
+          isDw: false,
+          tsqName,
+          isReturn: false,
+        },
+        "fao01001",
+        "query",
+      );
+      depositTransactions.push({ accountNo, currency, response });
+      const next = stringAt(dataAt(response), "tsqName");
+      if (!next || next === tsqName) break;
+      if (page === MAX_TRANSACTION_PAGES - 1) {
+        throw new MegabankProtocolError(
+          "兆豐存款交易分頁超過安全上限，未更新資料。",
+        );
+      }
+      tsqName = next;
+    }
+  }
+  let parsed;
+  try {
+    parsed = parseMegabankData({
+      deposits,
+      depositTransactions,
+      cardOverview,
+      cardBills,
+      cardHome,
+      cardTransactions,
+    });
+  } catch {
+    throw new MegabankProtocolError(
+      "兆豐銀行帳務欄位無法完整辨識，未更新資料。",
+    );
+  }
+  if (
+    arrayAt(dataAt(deposits), "depositInfoList").length > 0 &&
+    parsed.bankAccounts.every((account) => account.accountType === "credit")
+  ) {
+    throw new MegabankProtocolError("兆豐存款資料無法辨識，未更新資料。");
+  }
+  if (
+    cardNumbers.length > 0 &&
+    parsed.bankAccounts.every((account) => account.accountType !== "credit")
+  ) {
+    throw new MegabankProtocolError("兆豐信用卡資料無法辨識，未更新資料。");
+  }
+  return {
+    records: [],
+    ...parsed,
+    cursor: JSON.stringify({ syncedAt: new Date().toISOString() }),
   };
 }
 
@@ -333,7 +452,24 @@ class MegabankSession {
   private txnToken = String(Date.now());
   private clientNo = String(Date.now());
 
-  constructor(private readonly fetcher: Fetcher) {}
+  constructor(
+    private readonly fetcher: Fetcher,
+    device?: MegabankDevice,
+  ) {
+    if (device) {
+      this.deviceCode = device.deviceCode;
+      this.deviceUKey = device.deviceUKey;
+      this.seed = device.deviceSeed;
+    }
+  }
+
+  device(): MegabankDevice {
+    return {
+      deviceCode: this.deviceCode,
+      deviceUKey: this.deviceUKey,
+      deviceSeed: this.seed,
+    };
+  }
 
   static deserialize(serialized: string, fetcher: Fetcher): MegabankSession {
     let state: SessionState;
@@ -359,6 +495,7 @@ class MegabankSession {
       );
     }
     const session = new MegabankSession(fetcher);
+    session.authenticated = state.authenticated === true;
     session.accessToken = state.accessToken;
     session.xAuthToken = state.xAuthToken || "";
     session.txnToken = state.txnToken || String(Date.now());
@@ -375,6 +512,7 @@ class MegabankSession {
   serialize(): string {
     return JSON.stringify({
       version: 1,
+      authenticated: this.authenticated,
       accessToken: this.accessToken,
       xAuthToken: this.xAuthToken,
       cookies: Object.fromEntries(this.cookies),
@@ -420,7 +558,14 @@ class MegabankSession {
     await this.resource("ixtein-pmbinit", "/fco/fco00001/initialize", {});
   }
 
-  async login(credentials: Credentials, captcha: string): Promise<void> {
+  isAuthenticated(): boolean {
+    return this.authenticated;
+  }
+
+  async login(
+    credentials: Credentials,
+    captcha: string,
+  ): Promise<{ requiresTwoFactor: boolean; highIpFar: boolean }> {
     const e2ee = await this.resource(
       "prelogin",
       "/fco/fco00001/e2ee",
@@ -466,8 +611,47 @@ class MegabankSession {
         "兆豐銀行登入未通過，請至官方 App 確認登入資料或驗證要求。",
       );
     }
+    const loginData = dataAt(response);
     this.authenticated = true;
     await this.adapterRequest("resource/login", {});
+    // 與官方前端相同：secondFactorFlag 為 Y 走雙重驗證；否則異地登入需簡訊或 Email 驗證碼。
+    return {
+      requiresTwoFactor: stringAt(loginData, "secondFactorFlag") === "Y",
+      highIpFar: loginData.isHighIpFar === true,
+    };
+  }
+
+  async requestVerifyCode(type: "sms"): Promise<string> {
+    const response = await this.resource(
+      "megapmb",
+      "/fco/fco00001/getverifycode",
+      { type },
+      "fco02003",
+      "high-far",
+    );
+    const checkCode = stringAt(dataAt(response), "checkCode");
+    return /^[A-Za-z0-9]{1,12}$/.test(checkCode) ? checkCode : "";
+  }
+
+  async validateVerifyCode(code: string): Promise<boolean> {
+    const response = await this.resource(
+      "megapmb",
+      "/fco/fco00001/validatecode",
+      { code },
+      "fco02003",
+      "high-far",
+      true,
+    );
+    const resultCode = stringAt(response, "code");
+    if (resultCode !== "0000") {
+      const safeCode = /^[A-Za-z0-9_-]{1,32}$/.test(resultCode)
+        ? resultCode
+        : "unknown";
+      throw new MegabankVerificationRequiredError(
+        `兆豐銀行簡訊驗證失敗（代碼 ${safeCode}），請重新取得圖形驗證碼。`,
+      );
+    }
+    return dataAt(response).success === true;
   }
 
   async logout(): Promise<void> {

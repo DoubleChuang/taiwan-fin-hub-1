@@ -24,6 +24,7 @@ export const APPROVED_DOMAINS = [
   "*.kgibank.com.tw",
   "*.megabank.com.tw",
   "*.nextbank.com.tw",
+  "*.rakuten-bank.com.tw",
   "*.einvoice.nat.gov.tw",
   "*.tdcc.com.tw",
   "cloudflareaccess.com",

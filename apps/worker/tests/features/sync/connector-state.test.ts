@@ -144,6 +144,7 @@ describe("connector state boundaries", () => {
           pendingSession: "synthetic-token",
           pendingSessionExpiresAt: "2026-09-25T08:02:00.000Z",
           captcha: "12345",
+          otp: "654321",
           syncedAt: "2026-09-25T08:01:00.000Z",
         }),
       ),
@@ -153,6 +154,7 @@ describe("connector state boundaries", () => {
         pendingSession: "synthetic-token",
         pendingSessionExpiresAt: "2026-09-25T08:02:00.000Z",
         captcha: "12345",
+        otp: "654321",
       },
     });
     expect(

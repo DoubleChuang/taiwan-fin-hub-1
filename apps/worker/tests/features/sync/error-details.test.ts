@@ -7,7 +7,12 @@ import {
   CathayOtpSessionExpiredError,
 } from "../../../src/connectors/cathaybk";
 import {
+  RakutenAutoCaptchaFailedError,
+  RakutenConnectionError,
+} from "../../../src/connectors/rakuten";
+import {
   isUserActionError,
+  ManualCaptchaRequiredError,
   safeErrorLogDetails,
   safeErrorMessage,
 } from "../../../src/features/sync/service";
@@ -34,6 +39,28 @@ describe("sync error details", () => {
     );
     expect(isUserActionError(new CathayOtpSessionExpiredError())).toBe(true);
     expect(isUserActionError(new CathayOtpInvalidError())).toBe(true);
+  });
+
+  it("pauses scheduling after Rakuten OCR fails by classifying it as a user action", () => {
+    // needs_user_action 的 job 不會再被排程挑選（見 schedule-state.test.ts），
+    // 直到使用者以人工驗證碼同步成功；一次排程最多只送出 3 次驗證碼。
+    for (const reason of [
+      "exhausted",
+      "recognizer_unavailable",
+      "out_of_time",
+    ] as const) {
+      expect(
+        isUserActionError(
+          new RakutenAutoCaptchaFailedError(reason, "請改用人工驗證"),
+        ),
+      ).toBe(true);
+    }
+    expect(
+      isUserActionError(new ManualCaptchaRequiredError("請改用人工驗證")),
+    ).toBe(true);
+    expect(
+      isUserActionError(new RakutenConnectionError("登入結果無法辨識")),
+    ).toBe(false);
   });
 
   it("uses a non-empty fallback when Error.message is blank", () => {

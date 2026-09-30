@@ -38,6 +38,9 @@
   import { formatDateTime } from "@/shared/format/financial";
   import {
     browserCaptchaFailure,
+    isManualCaptchaRequired,
+    isMegabankOtpRequired,
+    megabankOtpFailure,
     needsNextbankCaptcha,
   } from "./browser-captcha";
   import { shouldEnableScheduleAfterFirstSync } from "./schedule-after-sync";
@@ -84,6 +87,12 @@
   let bankCaptcha = $state("");
   let bankCaptchaDigitCount = $state(6);
   let bankCaptchaKind = $state<"numeric" | "alphanumeric">("numeric");
+  let megabankOtpStep = $state(false);
+  let megabankOtpMessage = $state("");
+  let megabankOtp = $state("");
+  let megabankOtpExpiresAt = $state<number | null>(null);
+  let megabankOtpSecondsRemaining = $state(0);
+  const MEGABANK_OTP_WINDOW_MS = 3 * 60_000;
   let pendingSyncTarget = $state<SyncTarget>("default");
   let einvoiceSyncQueued = $state(false);
   let einvoiceSyncQueuedTimer: ReturnType<typeof setTimeout> | undefined;
@@ -108,11 +117,15 @@
       connectorId === "nextbank" ||
       connectorId === "firstbank" ||
       connectorId === "hncb" ||
+      connectorId === "rakuten" ||
       connectorId === "kgibank" ||
       connectorId === "megabank",
   );
   const browserBankSessionAvailable = $derived(
     browserBank && Boolean($settings.data?.sessionAvailable),
+  );
+  const megabankOtpActive = $derived(
+    connectorId === "megabank" && megabankOtpStep,
   );
   const tdccConnectionReady = $derived(
     connectorId === "tdcc" && Boolean($settings.data?.sessionAvailable),
@@ -191,6 +204,7 @@
       bankCaptchaSeconds = bankCaptchaExpiresAt
         ? Math.max(0, Math.ceil((bankCaptchaExpiresAt - Date.now()) / 1000))
         : 0;
+      updateMegabankOtpCountdown();
     }, 1_000);
     return () => clearInterval(timer);
   });
@@ -314,8 +328,24 @@
     onError: (e) => {
       if (handleTdccVerificationRequired(e)) return;
       if (handleCathayVerificationRequired(e)) return;
+      if (connectorId === "megabank" && isMegabankOtpRequired(e)) {
+        enterMegabankOtp(
+          e instanceof Error
+            ? e.message
+            : "兆豐銀行已寄出簡訊驗證碼，請於三分鐘內輸入。",
+        );
+        qc.invalidateQueries({
+          queryKey: queryKeys.connectorSettings(connectorId),
+        });
+        return;
+      }
       error = e instanceof Error ? e.message : "同步失敗";
-      if (needsNextbankCaptcha(connectorId, e)) $prepareBrowserBank.mutate();
+      if (browserBank && isManualCaptchaRequired(e)) {
+        // 自動辨識失敗：直接取得人工驗證碼，不再重試自動登入
+        $prepareBrowserBank.mutate();
+      } else if (needsNextbankCaptcha(connectorId, e)) {
+        $prepareBrowserBank.mutate();
+      }
       if (browserBank)
         qc.invalidateQueries({
           queryKey: queryKeys.connectorSettings(connectorId),
@@ -426,6 +456,17 @@
         qc.invalidateQueries({ queryKey: queryKeys.syncJobs });
         return;
       }
+      if (connectorId === "megabank" && isMegabankOtpRequired(e)) {
+        enterMegabankOtp(
+          e instanceof Error
+            ? e.message
+            : "兆豐銀行已寄出簡訊驗證碼，請於三分鐘內輸入。",
+        );
+        qc.invalidateQueries({
+          queryKey: queryKeys.connectorSettings(connectorId),
+        });
+        return;
+      }
       const failure = browserCaptchaFailure(e);
       error = failure.message;
       if (failure.sessionInvalidated || bankVerificationSubmitted) {
@@ -435,6 +476,49 @@
           queryKey: queryKeys.connectorSettings(connectorId),
         });
       }
+    },
+  });
+  const verifyMegabankOtp = createMutation({
+    onMutate: () => ({
+      enableSchedule: shouldEnableScheduleAfterFirstSync(connectorId, job),
+    }),
+    mutationFn: () => {
+      if (demoMode) throw new Error("Demo site 已停用連接器同步。");
+      const trimmed = megabankOtp.trim();
+      if (!/^\d{4,8}$/.test(trimmed))
+        throw new Error("請輸入簡訊收到的 4-8 位數字驗證碼。");
+      return api.post(`/api/connectors/megabank/sync`, { otp: trimmed });
+    },
+    onSuccess: (_data, _variables, context) => {
+      error = "";
+      resetMegabankOtp();
+      bankCaptcha = "";
+      bankCaptchaImage = "";
+      qc.invalidateQueries({
+        queryKey: queryKeys.connectorSettings(connectorId),
+      });
+      qc.invalidateQueries({ queryKey: queryKeys.syncJobs });
+      qc.invalidateQueries({ queryKey: queryKeys.summary });
+      invalidateLatestSyncReport();
+      qc.invalidateQueries({ queryKey: queryKeys.bank });
+      qc.invalidateQueries({ queryKey: queryKeys.bills });
+      enableScheduleAfterSuccessfulSync(context.enableSchedule);
+    },
+    onError: (e) => {
+      if (megabankOtpFailure(e) === "retry") {
+        megabankOtp = "";
+        error =
+          e instanceof Error
+            ? e.message
+            : "兆豐銀行簡訊驗證碼不正確，請重新輸入。";
+        return;
+      }
+      const failure = browserCaptchaFailure(e);
+      resetMegabankOtp();
+      error = failure.message;
+      qc.invalidateQueries({
+        queryKey: queryKeys.connectorSettings(connectorId),
+      });
     },
   });
   const verifyOtp = createMutation({
@@ -600,6 +684,38 @@
     resetCathayVerification();
     error = "";
     $sync.mutate("default");
+  }
+
+  function enterMegabankOtp(message: string) {
+    error = "";
+    bankCaptcha = "";
+    bankCaptchaImage = "";
+    megabankOtp = "";
+    megabankOtpMessage = message;
+    megabankOtpStep = true;
+    megabankOtpExpiresAt = Date.now() + MEGABANK_OTP_WINDOW_MS;
+    megabankOtpSecondsRemaining = Math.ceil(MEGABANK_OTP_WINDOW_MS / 1_000);
+  }
+
+  function resetMegabankOtp() {
+    megabankOtpStep = false;
+    megabankOtp = "";
+    megabankOtpMessage = "";
+    megabankOtpExpiresAt = null;
+    megabankOtpSecondsRemaining = 0;
+    $verifyMegabankOtp.reset();
+  }
+
+  function updateMegabankOtpCountdown() {
+    if (!megabankOtpStep || megabankOtpExpiresAt === null) return;
+    megabankOtpSecondsRemaining = Math.max(
+      0,
+      Math.ceil((megabankOtpExpiresAt - Date.now()) / 1_000),
+    );
+    if (megabankOtpSecondsRemaining <= 0) {
+      error = "兆豐簡訊驗證碼已逾時，請重新取得驗證碼。";
+      resetMegabankOtp();
+    }
   }
 
   function enableScheduleAfterSuccessfulSync(eligible: boolean) {
@@ -811,7 +927,8 @@
             size="sm"
             disabled={demoMode ||
               $sync.isPending ||
-              $verifyBrowserBank.isPending}
+              $verifyBrowserBank.isPending ||
+              megabankOtpActive}
             onclick={() => {
               error = "";
               $sync.mutate("default");
@@ -825,7 +942,8 @@
             variant="outline"
             disabled={demoMode ||
               $prepareBrowserBank.isPending ||
-              $verifyBrowserBank.isPending}
+              $verifyBrowserBank.isPending ||
+              megabankOtpActive}
             onclick={() => {
               error = "";
               $prepareBrowserBank.mutate();
@@ -840,7 +958,8 @@
             disabled={demoMode ||
               $sync.isPending ||
               $prepareBrowserBank.isPending ||
-              $verifyBrowserBank.isPending}
+              $verifyBrowserBank.isPending ||
+              megabankOtpActive}
             onclick={() => {
               error = "";
               $sync.mutate("default");
@@ -855,7 +974,8 @@
             disabled={demoMode ||
               $sync.isPending ||
               $prepareBrowserBank.isPending ||
-              $verifyBrowserBank.isPending}
+              $verifyBrowserBank.isPending ||
+              megabankOtpActive}
             onclick={() => {
               error = "";
               $prepareBrowserBank.mutate();
@@ -1054,7 +1174,9 @@
                   ? "凱基"
                   : connectorId === "megabank"
                     ? "兆豐"
-                    : "永豐"}
+                    : connectorId === "rakuten"
+                      ? "樂天"
+                      : "永豐"}
       bind:captcha={bankCaptcha}
       captchaImage={bankCaptchaImage}
       digitCount={bankCaptchaDigitCount}
@@ -1540,6 +1662,67 @@
       {/if}
     </div>
   {/if}
+  {#if megabankOtpActive}
+    <div
+      class="mt-3 overflow-hidden rounded-xl border border-steel/20 bg-steel/[0.055]"
+    >
+      <div class="flex items-start gap-3 border-b border-steel/15 px-4 py-3">
+        <span
+          class="grid size-9 shrink-0 place-items-center rounded-full bg-steel/10 text-steel"
+        >
+          <Smartphone class="size-4.5" />
+        </span>
+        <div>
+          <p class="text-sm font-semibold text-fg">簡訊驗證碼已寄出</p>
+          <p class="mt-0.5 text-sm leading-relaxed text-fg/60">
+            {megabankOtpMessage}
+          </p>
+          <p class="mt-1 text-xs font-semibold text-steel" aria-live="polite">
+            請於 {cathayCountdownLabel(megabankOtpSecondsRemaining)} 內完成驗證
+          </p>
+        </div>
+      </div>
+      <div class="grid gap-3 p-4 sm:grid-cols-[minmax(0,1fr)_auto]">
+        <label class="grid gap-1.5 text-sm font-medium">
+          簡訊驗證碼
+          <Input
+            class="bg-card/80 tracking-[0.2em]"
+            inputmode="numeric"
+            autocomplete="one-time-code"
+            pattern={"[0-9]{4,8}"}
+            maxlength={8}
+            placeholder="4-8 位數字驗證碼"
+            bind:value={megabankOtp}
+          />
+        </label>
+        <Button
+          class="self-end"
+          size="sm"
+          disabled={$verifyMegabankOtp.isPending ||
+            !/^\d{4,8}$/.test(megabankOtp.trim())}
+          onclick={() => {
+            error = "";
+            $verifyMegabankOtp.mutate();
+          }}
+          ><ShieldCheck class="size-4" />{$verifyMegabankOtp.isPending
+            ? "驗證並同步中…"
+            : "驗證並同步"}</Button
+        >
+      </div>
+      <div
+        class="flex flex-wrap items-center justify-end gap-2 border-t border-steel/15 px-4 py-2.5"
+      >
+        <button
+          type="button"
+          class="text-sm font-semibold text-fg/55 underline-offset-4 hover:text-fg hover:underline"
+          onclick={() => {
+            error = "";
+            resetMegabankOtp();
+          }}>取消</button
+        >
+      </div>
+    </div>
+  {/if}
   {#if (connectorId === "tdcc" || connectorId === "cathaybk") && error}<p
       class="mt-3 rounded-lg border border-coral/20 bg-coral/[0.06] px-3 py-2 text-sm font-medium text-coral"
     >
@@ -1562,6 +1745,8 @@
                   ? "首次驗證會加入信任裝置；信任失效時需在手動同步中重新取得驗證碼。"
                   : connectorId === "megabank"
                     ? "兆豐同步直接使用 App API，以一般帳密登入並辨識五位數圖形驗證碼；也可改用人工輸入。"
-                    : "輸入完帳號密碼後，請先按「儲存設定」，再按「同步」。"}
+                    : connectorId === "rakuten"
+                      ? "樂天網銀驗證碼會先以 Workers AI 自動辨識，失敗時改由人工輸入；每次同步都重新登入，結束時登出，不保留 session。"
+                      : "輸入完帳號密碼後，請先按「儲存設定」，再按「同步」。"}
   </p>
 </Card>

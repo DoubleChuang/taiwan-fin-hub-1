@@ -21,6 +21,7 @@ const OVERVIEW_PATH = `${API_ROOT}/web4/rb0760/getCardOverviewData`;
 const BILL_PATH = `${API_ROOT}/web4/rb0708rwd/init`;
 const REALTIME_PATH = `${API_ROOT}/web4/rb0708rwd/qryRealTime`;
 export const TAISHIN_AUTO_LOGIN_ATTEMPTS = 3;
+const TAISHIN_AUTO_OCR_ATTEMPTS = 6;
 const CAPTCHA_KEEP_ALIVE_MS = 150_000;
 const CAPTCHA_VALIDITY_MS = 120_000;
 const CAPTCHA_IMAGE_TIMEOUT_MS = 10_000;
@@ -356,39 +357,63 @@ async function loginWithOcr(
     digitCount: number,
   ) => Promise<string | null>,
 ) {
-  for (let attempt = 1; attempt <= TAISHIN_AUTO_LOGIN_ATTEMPTS; attempt += 1) {
+  let ocrAttempts = 0;
+  let loginRequests = 0;
+  while (
+    ocrAttempts < TAISHIN_AUTO_OCR_ATTEMPTS &&
+    loginRequests < TAISHIN_AUTO_LOGIN_ATTEMPTS
+  ) {
+    const startedAt = Date.now();
+    const previousLoginRequests = loginRequests;
+    let captchaValid = false;
+    let outcome = "failed";
     try {
       const { frame, captcha } = await openLoginAndCaptureCaptcha(page, config);
+      ocrAttempts += 1;
       const answer = await recognizeCaptcha(
         toArrayBuffer(captcha.bytes),
         captcha.digitCount,
       );
       if (answer === null) {
-        console.warn(
-          JSON.stringify({
-            event: "taishin_ocr_invalid_result",
-            connectorId: "taishin",
-            attempt,
-            digitCount: captcha.digitCount,
-          }),
-        );
+        outcome = "ocr_invalid";
         continue;
       }
       assertCaptcha(answer, captcha.digitCount);
-      await submitLogin(frame, answer, "automatic", page);
+      captchaValid = true;
+      await submitLogin(frame, answer, "automatic", page, () => {
+        loginRequests += 1;
+      });
+      outcome = "success";
       return frame;
     } catch (error) {
-      if (error instanceof TaishinCredentialRejectedError) throw error;
-      if (
-        !(error instanceof TaishinCaptchaRejectedError) &&
-        !(error instanceof TaishinLoginOutcomeUnknownError)
-      ) {
+      if (error instanceof TaishinCaptchaRejectedError) {
+        outcome = captchaValid ? "captcha_rejected" : "ocr_invalid";
+      } else {
+        if (error instanceof TaishinCredentialRejectedError) {
+          outcome = "credential_rejected";
+        } else if (error instanceof TaishinLoginOutcomeUnknownError) {
+          outcome = "login_unknown";
+        }
         throw error;
       }
+    } finally {
+      console.log(
+        JSON.stringify({
+          event: "taishin_auto_login_attempt",
+          connectorId: "taishin",
+          ocrAttempt: ocrAttempts,
+          loginRequests: loginRequests - previousLoginRequests,
+          totalLoginRequests: loginRequests,
+          outcome,
+          elapsedMs: Date.now() - startedAt,
+        }),
+      );
     }
   }
   throw new TaishinVerificationRequiredError(
-    `台新自動驗證連續失敗 ${TAISHIN_AUTO_LOGIN_ATTEMPTS} 次，請改用人工驗證。`,
+    loginRequests >= TAISHIN_AUTO_LOGIN_ATTEMPTS
+      ? `台新自動登入已送出 ${loginRequests} 次，驗證碼仍遭拒絕，請改用人工驗證。`
+      : `台新驗證碼辨識已達 ${ocrAttempts} 次上限（登入已送出 ${loginRequests} 次），請改用人工驗證。`,
   );
 }
 
@@ -911,6 +936,7 @@ async function submitLogin(
   captcha: string,
   mode: "manual" | "automatic" = "automatic",
   networkPage?: Page,
+  onLoginRequest?: () => void,
 ) {
   const startedAt = Date.now();
   const sessionChecks: SessionCheckDiagnostic[] = [];
@@ -921,7 +947,9 @@ async function submitLogin(
     url.split("?")[0] ===
     "https://my.taishinbank.com.tw/TIBNetBank/svc/web/login/login";
   const onRequest = (request: HTTPRequest) => {
-    if (isLoginUrl(request.url())) loginRequestCount += 1;
+    if (!isLoginUrl(request.url())) return;
+    loginRequestCount += 1;
+    onLoginRequest?.();
   };
   const onResponse = (response: HTTPResponse) => {
     if (!isLoginUrl(response.url())) return;
@@ -976,7 +1004,7 @@ async function submitLogin(
       if (isMissingLoginField(detail)) {
         await dismissMissingFieldAlert(page);
         throw new TaishinLoginOutcomeUnknownError(
-          "台新登入頁沒有帶入身分證字號，將重新嘗試。",
+          "台新登入頁沒有帶入身分證字號，請稍後再試。",
         );
       }
       if (isCaptchaRejected(detail)) {
@@ -1016,7 +1044,9 @@ async function submitLogin(
     throw new TaishinLoginOutcomeUnknownError(
       mode === "manual"
         ? "台新人工驗證已送出，但尚未確認登入成功，請稍後重新取得驗證碼再試。"
-        : "台新自動驗證已送出，但尚未確認登入成功。",
+        : loginRequestCount > 0
+          ? "台新自動驗證已送出，但尚未確認登入成功。"
+          : "台新自動登入請求未送出，請稍後再試。",
     );
   } finally {
     networkPage?.off("request", onRequest);

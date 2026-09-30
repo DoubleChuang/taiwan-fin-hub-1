@@ -164,6 +164,94 @@ function renderFirstbankPanel() {
   return { ...result, api };
 }
 
+function renderMegabankPanel(post: ReturnType<typeof vi.fn>) {
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false, staleTime: 30_000 } },
+  });
+  const api = {
+    get: vi.fn((path: string) => {
+      if (path === "/api/sync-jobs") {
+        return Promise.resolve([
+          syncJob({ id: "megabank:all", connectorId: "megabank" }),
+        ]);
+      }
+      if (path === "/api/connectors/megabank/settings") {
+        return Promise.resolve({
+          connectorId: "megabank",
+          configured: true,
+          credentialsComplete: true,
+          sessionAvailable: false,
+          updatedAt: "2026-09-27T00:00:00.000Z",
+        });
+      }
+      return Promise.resolve({});
+    }),
+    post,
+    patch: vi.fn(),
+  } as unknown as ApiClient;
+  const result = render(
+    ConnectorPanel,
+    {
+      props: {
+        api,
+        connectorId: "megabank",
+        demoMode: false,
+        title: "兆豐銀行",
+        fields: connectorFields.megabank as ConnectorField[],
+      },
+    },
+    {
+      wrapper: QueryClientProvider,
+      wrapperProps: { client: queryClient },
+    },
+  );
+  return { ...result, api };
+}
+
+function renderRakutenPanel(post: ReturnType<typeof vi.fn>) {
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false, staleTime: 30_000 } },
+  });
+  const api = {
+    get: vi.fn((path: string) => {
+      if (path === "/api/sync-jobs") {
+        return Promise.resolve([
+          syncJob({ id: "rakuten:all", connectorId: "rakuten" }),
+        ]);
+      }
+      if (path === "/api/connectors/rakuten/settings") {
+        return Promise.resolve({
+          connectorId: "rakuten",
+          configured: true,
+          credentialsComplete: true,
+          sessionAvailable: false,
+          updatedAt: "2026-09-27T00:00:00.000Z",
+        });
+      }
+      return Promise.resolve({});
+    }),
+    post,
+    patch: vi.fn(),
+  } as unknown as ApiClient;
+  const result = render(
+    ConnectorPanel,
+    {
+      props: {
+        api,
+        connectorId: "rakuten",
+        demoMode: false,
+        title: "樂天國際銀行",
+        fields: connectorFields.rakuten as ConnectorField[],
+      },
+    },
+    {
+      wrapper: QueryClientProvider,
+      wrapperProps: { client: queryClient },
+    },
+  );
+  return { ...result, api };
+}
+
 function renderNextbankPanel() {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false, staleTime: 30_000 } },
@@ -228,6 +316,64 @@ describe("ConnectorPanel", () => {
     expect(getByRole("button", { name: "人工輸入驗證碼" })).toBeEnabled();
     expect(api.post).not.toHaveBeenCalled();
     expect(api.patch).not.toHaveBeenCalled();
+  });
+
+  it("switches Rakuten to a manual CAPTCHA when automatic recognition fails", async () => {
+    const post = vi.fn((path: string) => {
+      if (path === "/api/connectors/rakuten/sync") {
+        return Promise.reject(
+          new ApiRequestError(
+            "MANUAL_CAPTCHA_REQUIRED",
+            "樂天驗證碼自動辨識連續失敗 3 次，請改用人工驗證。",
+            400,
+          ),
+        );
+      }
+      if (path === "/api/connectors/rakuten/captcha") {
+        return Promise.resolve({
+          captchaImage: "data:image/png;base64,AQID",
+          expiresAt: "2026-09-27T00:02:00.000Z",
+          captchaLength: 4,
+          captchaKind: "alphanumeric",
+        });
+      }
+      return Promise.resolve({});
+    });
+    const { findByAltText, findByRole } = renderRakutenPanel(post);
+
+    await fireEvent.click(
+      await findByRole("button", { name: "自動驗證並同步" }),
+    );
+
+    expect(await findByAltText("樂天圖形驗證碼")).toBeInTheDocument();
+    expect(post.mock.calls.map(([path]) => path)).toEqual([
+      "/api/connectors/rakuten/sync",
+      "/api/connectors/rakuten/captcha",
+    ]);
+  });
+
+  it("does not open a manual CAPTCHA for other Rakuten user-action errors", async () => {
+    const post = vi.fn((path: string) =>
+      path === "/api/connectors/rakuten/sync"
+        ? Promise.reject(
+            new ApiRequestError(
+              "USER_ACTION_REQUIRED",
+              "樂天銀行身分證字號、使用者代號或密碼錯誤。",
+              400,
+            ),
+          )
+        : Promise.resolve({}),
+    );
+    const { findByRole, findByText } = renderRakutenPanel(post);
+
+    await fireEvent.click(
+      await findByRole("button", { name: "自動驗證並同步" }),
+    );
+
+    expect(
+      await findByText(/樂天銀行身分證字號、使用者代號或密碼錯誤。/),
+    ).toBeInTheDocument();
+    expect(post).toHaveBeenCalledTimes(1);
   });
 
   it("keeps connector credential fields from inviting browser autofill", async () => {
@@ -628,4 +774,155 @@ describe("Nextbank CAPTCHA recovery", () => {
       expect(v.api.post).toHaveBeenCalledTimes(1);
     },
   );
+});
+
+describe("Megabank SMS OTP", () => {
+  const otpRequiredError = () =>
+    new ApiRequestError(
+      "MEGABANK_SMS_OTP_REQUIRED",
+      "兆豐銀行已寄出簡訊驗證碼（簡訊檢核碼 1234），請於三分鐘內輸入。",
+      400,
+    );
+
+  it("enters the SMS OTP step when the bank requires it after login", async () => {
+    const post = vi.fn((path: string) =>
+      path === "/api/connectors/megabank/sync"
+        ? Promise.reject(otpRequiredError())
+        : Promise.resolve({}),
+    );
+    const { findByRole, findByText, findByPlaceholderText } =
+      renderMegabankPanel(post);
+
+    await fireEvent.click(
+      await findByRole("button", { name: "自動驗證並同步" }),
+    );
+
+    expect(
+      await findByText(
+        "兆豐銀行已寄出簡訊驗證碼（簡訊檢核碼 1234），請於三分鐘內輸入。",
+      ),
+    ).toBeInTheDocument();
+    expect(await findByPlaceholderText("4-8 位數字驗證碼")).toBeInTheDocument();
+    expect(post).toHaveBeenCalledTimes(1);
+  });
+
+  it("completes sync and clears the OTP step on success", async () => {
+    const post = vi
+      .fn()
+      .mockRejectedValueOnce(otpRequiredError())
+      .mockResolvedValueOnce({ success: true });
+    const { findByRole, findByPlaceholderText, queryByPlaceholderText } =
+      renderMegabankPanel(post);
+
+    await fireEvent.click(
+      await findByRole("button", { name: "自動驗證並同步" }),
+    );
+    const input = await findByPlaceholderText("4-8 位數字驗證碼");
+    await fireEvent.input(input, { target: { value: "123456" } });
+    await fireEvent.click(await findByRole("button", { name: "驗證並同步" }));
+
+    await waitFor(() =>
+      expect(
+        queryByPlaceholderText("4-8 位數字驗證碼"),
+      ).not.toBeInTheDocument(),
+    );
+    expect(post).toHaveBeenNthCalledWith(2, "/api/connectors/megabank/sync", {
+      otp: "123456",
+    });
+  });
+
+  it("keeps the OTP step and clears the input when the SMS code is wrong", async () => {
+    const post = vi
+      .fn()
+      .mockRejectedValueOnce(otpRequiredError())
+      .mockRejectedValueOnce(
+        new ApiRequestError(
+          "MEGABANK_OTP_INVALID",
+          "兆豐銀行簡訊驗證碼不正確，請重新輸入。",
+          400,
+        ),
+      );
+    const { findByRole, findByPlaceholderText, findByText } =
+      renderMegabankPanel(post);
+
+    await fireEvent.click(
+      await findByRole("button", { name: "自動驗證並同步" }),
+    );
+    const input = await findByPlaceholderText("4-8 位數字驗證碼");
+    await fireEvent.input(input, { target: { value: "000000" } });
+    await fireEvent.click(await findByRole("button", { name: "驗證並同步" }));
+
+    expect(
+      await findByText(/兆豐銀行簡訊驗證碼不正確，請重新輸入。/),
+    ).toBeInTheDocument();
+    expect(await findByPlaceholderText("4-8 位數字驗證碼")).toHaveValue("");
+    expect(post).toHaveBeenCalledTimes(2);
+  });
+
+  it("exits the OTP step and resets to the initial state on any other error", async () => {
+    const post = vi
+      .fn()
+      .mockRejectedValueOnce(otpRequiredError())
+      .mockRejectedValueOnce(
+        new ApiRequestError(
+          "USER_ACTION_REQUIRED",
+          "兆豐銀行簡訊驗證已逾時，請重新取得圖形驗證碼。",
+          400,
+        ),
+      );
+    const {
+      findByRole,
+      findByPlaceholderText,
+      findByText,
+      queryByPlaceholderText,
+    } = renderMegabankPanel(post);
+
+    await fireEvent.click(
+      await findByRole("button", { name: "自動驗證並同步" }),
+    );
+    const input = await findByPlaceholderText("4-8 位數字驗證碼");
+    await fireEvent.input(input, { target: { value: "123456" } });
+    await fireEvent.click(await findByRole("button", { name: "驗證並同步" }));
+
+    expect(
+      await findByText(/兆豐銀行簡訊驗證已逾時，請重新取得圖形驗證碼。/),
+    ).toBeInTheDocument();
+    expect(queryByPlaceholderText("4-8 位數字驗證碼")).not.toBeInTheDocument();
+    expect(
+      await findByRole("button", { name: "自動驗證並同步" }),
+    ).toBeEnabled();
+    expect(post).toHaveBeenCalledTimes(2);
+  });
+
+  it("enters the SMS OTP step from a manual CAPTCHA submission too", async () => {
+    const post = vi.fn((path: string) => {
+      if (path === "/api/connectors/megabank/captcha") {
+        return Promise.resolve({
+          captchaImage: "data:image/png;base64,AQID",
+          expiresAt: new Date(Date.now() + 120000).toISOString(),
+          captchaLength: 5,
+          captchaKind: "numeric",
+        });
+      }
+      if (path === "/api/connectors/megabank/sync") {
+        return Promise.reject(otpRequiredError());
+      }
+      return Promise.resolve({});
+    });
+    const { findByRole, findByPlaceholderText } = renderMegabankPanel(post);
+
+    await fireEvent.click(
+      await findByRole("button", { name: "人工輸入驗證碼" }),
+    );
+    await fireEvent.input(await findByPlaceholderText("5 位數字驗證碼"), {
+      target: { value: "12345" },
+    });
+    await fireEvent.click(await findByRole("button", { name: "驗證並同步" }));
+
+    expect(await findByPlaceholderText("4-8 位數字驗證碼")).toBeInTheDocument();
+    expect(post.mock.calls.map((c) => c[0])).toEqual([
+      "/api/connectors/megabank/captcha",
+      "/api/connectors/megabank/sync",
+    ]);
+  });
 });

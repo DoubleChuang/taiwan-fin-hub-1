@@ -22,6 +22,8 @@ import {
   ObankProtocolError,
   ObankVerificationRequiredError,
   createMegabankConnector,
+  MegabankOtpInvalidError,
+  MegabankOtpRequiredError,
   MegabankProtocolError,
   MegabankVerificationRequiredError,
   parseCathaybkConfig,
@@ -33,6 +35,7 @@ import {
   parseSinopacConfig,
   parseHncbConfig,
   parseKgibankConfig,
+  parseRakutenConfig,
   parseTaishinConfig,
   parseTdccConfig,
   syncTdccTradeHistory,
@@ -73,6 +76,12 @@ import {
   prepareKgibankCaptcha,
   KgibankVerificationRequiredError,
 } from "../../connectors/kgibank";
+import {
+  createRakutenConnector,
+  prepareRakutenCaptcha,
+  RakutenAutoCaptchaFailedError,
+  RakutenVerificationRequiredError,
+} from "../../connectors/rakuten";
 import {
   createTaishinConnector,
   prepareTaishinCaptcha,
@@ -189,6 +198,8 @@ export class NeedsUserActionError extends Error {
   }
 }
 
+/** 自動辨識驗證碼失敗，前端應直接改走人工驗證碼流程。 */
+export class ManualCaptchaRequiredError extends NeedsUserActionError {}
 export class NextbankCaptchaRequiredError extends NeedsUserActionError {}
 
 export type SinopacSyncOverrides = {
@@ -196,6 +207,10 @@ export type SinopacSyncOverrides = {
 };
 
 export type HncbSyncOverrides = {
+  captcha?: string;
+};
+
+export type RakutenSyncOverrides = {
   captcha?: string;
 };
 
@@ -213,6 +228,7 @@ export type ObankSyncOverrides = {
 
 export type MegabankSyncOverrides = {
   captcha?: string;
+  otp?: string;
 };
 
 export type FirstbankSyncOverrides = {
@@ -322,6 +338,56 @@ export async function prepareHncbCaptchaSession(env: Env) {
       expiresAt: prepared.browserSessionExpiresAt,
       digitCount: prepared.captchaDigitCount,
       captchaKind: "numeric" as const,
+    };
+  } finally {
+    await releaseSyncJobLock(env.DB, lockRowId, runId);
+  }
+}
+
+export async function prepareRakutenCaptchaSession(env: Env) {
+  const connectorId = "rakuten";
+  const runId = crypto.randomUUID();
+  const lockRowId = canonicalSyncLockRowId(connectorId);
+  const locked = await acquireSyncJobLock(env.DB, {
+    lockRowId,
+    scope: SYNC_SCOPE_ALL,
+    trigger: "manual",
+    runId,
+    leaseMs: 3 * 60 * 1000,
+  });
+  if (!locked) throw new SyncAlreadyRunningError(connectorId);
+
+  try {
+    const settings = await requireConnectorSettings(env.DB, connectorId);
+    const stored = await decryptJson<Record<string, unknown>>(
+      settings.encrypted_config,
+      configEncryptionKey(env),
+    );
+    const publicStored = settings.public_config
+      ? JSON.parse(settings.public_config)
+      : {};
+    const config = parseRakutenConfig({ ...stored, ...publicStored });
+    const prepared = await prepareRakutenCaptcha(
+      createBrowserBinding(env),
+      config,
+    );
+    await updateConnectorEncryptedConfig(
+      env.DB,
+      connectorId,
+      await encryptJson(
+        {
+          ...stored,
+          browserSessionId: prepared.browserSessionId,
+          browserSessionExpiresAt: prepared.browserSessionExpiresAt,
+        },
+        configEncryptionKey(env),
+      ),
+    );
+    return {
+      captchaImage: prepared.captchaImage,
+      expiresAt: prepared.browserSessionExpiresAt,
+      captchaLength: prepared.captchaLength,
+      captchaKind: "alphanumeric" as const,
     };
   } finally {
     await releaseSyncJobLock(env.DB, lockRowId, runId);
@@ -512,6 +578,8 @@ export async function prepareMegabankCaptchaSession(env: Env) {
       await encryptJson(
         {
           ...stored,
+          // 首次取得驗證碼時固定虛擬裝置，之後登入都沿用，簡訊驗證才可能只需一次。
+          ...prepared.device,
           pendingSession: prepared.pendingSession,
           pendingSessionExpiresAt: prepared.pendingSessionExpiresAt,
         },
@@ -1621,6 +1689,12 @@ export function obankStoredConfigAfterSync(stored: Record<string, unknown>) {
   return cleaned;
 }
 
+function megabankStoredConfigAfterSync(stored: Record<string, unknown>) {
+  const cleaned = obankStoredConfigAfterSync(stored);
+  delete cleaned.otp;
+  return cleaned;
+}
+
 export async function syncMegabank(
   env: Env,
   trigger: SyncTrigger,
@@ -1645,7 +1719,7 @@ export async function syncMegabank(
     const relayFetch = createRelayFetch(env);
     const connector = createMegabankConnector(
       relayFetch ?? globalThis.fetch.bind(globalThis),
-      overrides.captcha
+      overrides.captcha || overrides.otp
         ? undefined
         : async (imageBytes, contentType) => {
             try {
@@ -1663,16 +1737,32 @@ export async function syncMegabank(
               );
             }
           },
+      // 只有使用者在場的手動同步才請銀行寄簡訊驗證碼，排程不觸發。
+      { allowOtpRequest: trigger === "manual" },
     );
     result = await connector.sync(config, settings.sync_cursor ?? undefined);
   } catch (error) {
-    const cleaned = obankStoredConfigAfterSync(stored);
+    const awaitingOtp =
+      error instanceof MegabankOtpRequiredError ||
+      error instanceof MegabankOtpInvalidError;
+    const cleaned = megabankStoredConfigAfterSync(stored);
     await updateConnectorEncryptedConfigIfCurrent(
       env.DB,
       connectorId,
       settings.encrypted_config,
-      await encryptJson(cleaned, configEncryptionKey(env)),
+      await encryptJson(
+        awaitingOtp
+          ? {
+              ...cleaned,
+              ...error.device,
+              pendingSession: error.pendingSession,
+              pendingSessionExpiresAt: error.pendingSessionExpiresAt,
+            }
+          : cleaned,
+        configEncryptionKey(env),
+      ),
     );
+    if (awaitingOtp) throw error;
     if (error instanceof MegabankVerificationRequiredError) {
       throw new NeedsUserActionError(error.message);
     }
@@ -1699,7 +1789,9 @@ export async function syncMegabank(
       creditCardBillRecord(connectorId, bill, now),
     ),
   ];
-  const cleanedConfig = parseMegabankConfig(obankStoredConfigAfterSync(config));
+  const cleanedConfig = parseMegabankConfig(
+    megabankStoredConfigAfterSync(config),
+  );
   if (
     (await requireConnectorSettings(env.DB, connectorId)).encrypted_config !==
     settings.encrypted_config
@@ -2068,6 +2160,139 @@ export async function syncHncb(
       persistedCursor && persistedCursor !== settings.sync_cursor,
     ),
   };
+}
+
+/**
+ * 樂天國銀 connector：不復用 session／cookie，每次同步都重新登入。
+ * 有使用者剛取得的人工驗證碼時優先使用；否則（含排程同步）以 Workers AI
+ * 自動辨識，失敗時拋出 ManualCaptchaRequiredError（needs_user_action），
+ * 排程會停止挑選這個 job，直到使用者以人工驗證碼同步成功。成功或失敗後都
+ * 要清除 `browserSessionId`／`browserSessionExpiresAt`／`captcha`。
+ */
+export async function syncRakuten(
+  env: Env,
+  trigger: SyncTrigger,
+  overrides: RakutenSyncOverrides = {},
+): Promise<SyncOutcome> {
+  const connectorId = "rakuten";
+  const scope = "all";
+  const settings = await requireConnectorSettings(env.DB, connectorId);
+  const stored = await decryptJson<Record<string, unknown>>(
+    settings.encrypted_config,
+    configEncryptionKey(env),
+  );
+  const config = parseRakutenConfig({
+    ...stored,
+    ...parsePublicConnectorConfig(connectorId, settings.public_config),
+    ...overrides,
+  });
+
+  console.log(
+    `[sync] ${connectorId}/${scope}: starting trigger=${trigger} (cursor=${settings.sync_cursor ? "set" : "none"})`,
+  );
+
+  let result: Awaited<
+    ReturnType<ReturnType<typeof createRakutenConnector>["sync"]>
+  >;
+  try {
+    const connector = createRakutenConnector(
+      createBrowserBinding(env),
+      overrides.captcha
+        ? undefined
+        : async (imageBytes, characterCount, contentType = "image/png") => {
+            try {
+              return (
+                await recognizeAlphanumericCaptcha(
+                  env.AI,
+                  imageBytes,
+                  contentType,
+                  characterCount,
+                )
+              ).code;
+            } catch {
+              throw new RakutenVerificationRequiredError(
+                "樂天圖形驗證碼無法自動辨識，請改用人工輸入。",
+              );
+            }
+          },
+    );
+    result = await connector.sync(config);
+  } catch (error) {
+    const cleaned = rakutenStoredConfigAfterSync(stored);
+    await updateConnectorEncryptedConfig(
+      env.DB,
+      connectorId,
+      await encryptJson(cleaned, configEncryptionKey(env)),
+    );
+    // 自動辨識失敗一樣是 needs_user_action：排程會停止挑選這個 job，直到
+    // 使用者以人工驗證碼同步成功為止，避免反覆自動登入觸發帳號鎖定。
+    if (error instanceof RakutenAutoCaptchaFailedError) {
+      throw new ManualCaptchaRequiredError(error.message);
+    }
+    if (error instanceof RakutenVerificationRequiredError) {
+      throw new NeedsUserActionError(error.message);
+    }
+    throw error;
+  }
+
+  const bankAccounts = result.bankAccounts ?? [];
+  const bankBalanceSnapshots = result.bankBalanceSnapshots ?? [];
+  const now = new Date().toISOString();
+  const records: SyncWriteRecord[] = [
+    ...bankAccounts.map((account) =>
+      bankAccountRecord(connectorId, account, now),
+    ),
+    ...bankBalanceSnapshots.map((snapshot) =>
+      bankBalanceSnapshotRecord(connectorId, snapshot, now),
+    ),
+  ];
+
+  // 沒有 session／cookie 可以復用，challenge 一律一次性消耗：無論成不成功都
+  // 要清掉 browserSessionId／captcha，只保留一個不含機密資料的稽核用 cursor。
+  const cleanedConfig = rakutenStoredConfigAfterSync(config);
+  const persistedCursor = JSON.stringify({ lastSyncedAt: now });
+  const finalizeStatements: D1PreparedStatement[] = [
+    connectorStateStatement(
+      env.DB,
+      connectorId,
+      await encryptConnectorConfig(env, connectorId, cleanedConfig),
+      serializePublicConfig(connectorId, cleanedConfig),
+      persistedCursor,
+      now,
+    ),
+  ];
+
+  const newRecords = await persistStagedSyncWrite(env.DB, {
+    records,
+    afterPromoteStatements:
+      bankAccounts.length > 0
+        ? [linkCanonicalBankAccountsStatement(env.DB)]
+        : [],
+    finalizeStatements,
+  });
+
+  if (bankBalanceSnapshots.length > 0) {
+    await rebuildBankDepositHistory(env.DB, [dateFromIso(now)]);
+  }
+
+  return {
+    success: true,
+    connectorId,
+    scope,
+    records: bankAccounts.length + bankBalanceSnapshots.length,
+    newRecords,
+    cursorUpdated: Boolean(
+      persistedCursor && persistedCursor !== settings.sync_cursor,
+    ),
+  };
+}
+
+export function rakutenStoredConfigAfterSync(stored: Record<string, unknown>) {
+  const cleaned = { ...stored };
+  delete cleaned.browserSessionId;
+  delete cleaned.browserSessionExpiresAt;
+  delete cleaned.captcha;
+  return cleaned;
 }
 
 export async function syncKgibank(
@@ -2813,7 +3038,9 @@ export function isUserActionError(error: unknown) {
     error instanceof SinopacVerificationRequiredError ||
     error instanceof TaishinVerificationRequiredError ||
     error instanceof HncbVerificationRequiredError ||
-    error instanceof KgibankVerificationRequiredError
+    error instanceof RakutenVerificationRequiredError ||
+    error instanceof KgibankVerificationRequiredError ||
+    error instanceof MegabankVerificationRequiredError
   )
     return true;
   const message = error instanceof Error ? error.message : String(error);
