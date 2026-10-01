@@ -1,6 +1,8 @@
 name: tmp pr permission probe
 
 on:
+  push:
+    branches: [tmp-pr-permission-probe]
   workflow_dispatch:
 
 permissions:
