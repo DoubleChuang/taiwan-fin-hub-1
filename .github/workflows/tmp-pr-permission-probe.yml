@@ -16,28 +16,18 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: non-draft shell PR
+      - name: PR create with an extra upstream remote
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           git config user.name "probe"
           git config user.email "probe@example.com"
-          git switch -c sync/probe-nondraft
-          git commit --allow-empty -m "probe non-draft"
-          git push origin HEAD:refs/heads/sync/probe-nondraft
-          gh pr create --base main --head sync/probe-nondraft --title "probe non-draft shell" --body "probe body with 中文" || echo "SHELL_NONDRAFT_FAILED"
-      - name: non-draft node spawn PR
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          git switch -c sync/probe-nondraft-node
-          git commit --allow-empty -m "probe non-draft node"
-          git push origin HEAD:refs/heads/sync/probe-nondraft-node
-          node -e '
-            const { spawnSync } = require("child_process");
-            const args = ["pr","create","--base","main","--head","sync/probe-nondraft-node","--title","probe non-draft node","--body","line1\nline2"];
-            const r = spawnSync("gh", args, { encoding: "utf8" });
-            console.log("NODE EXIT", r.status);
-            console.log(r.stdout || "");
-            console.error(r.stderr || "");
-          '
+          git remote add upstream https://github.com/TedLin1993/all-set-tw.git
+          git remote -v
+          echo "--- with upstream remote present ---"
+          git switch -c sync/probe-with-upstream
+          git commit --allow-empty -m "probe with upstream remote"
+          git push origin HEAD:refs/heads/sync/probe-with-upstream
+          gh pr create --base main --head sync/probe-with-upstream --title "probe with upstream remote" --body "probe" || echo "WITH_UPSTREAM_FAILED"
+          echo "--- with explicit --repo ---"
+          gh pr create --repo DoubleChuang/taiwan-fin-hub-1 --base main --head sync/probe-with-upstream --title "probe with repo flag" --body "probe" || echo "WITH_REPO_FLAG_FAILED"
