@@ -94,3 +94,43 @@ export async function decryptPayload<T = unknown>(
     return null;
   }
 }
+
+export type EncryptableSyncRecord = {
+  payload: Record<string, unknown>;
+};
+
+export async function encryptSyncRecordsRawPayload<
+  TRecord extends EncryptableSyncRecord,
+>(records: TRecord[], secret: string): Promise<TRecord[]> {
+  if (!secret || records.length === 0) {
+    return records;
+  }
+
+  const result: TRecord[] = [];
+  for (const record of records) {
+    const rawPayload = record.payload?.raw_payload;
+    if (
+      typeof rawPayload === "string" &&
+      rawPayload.length > 0 &&
+      !rawPayload.startsWith('{"v":1,"alg":"AES-GCM"')
+    ) {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(rawPayload);
+      } catch {
+        parsed = rawPayload;
+      }
+      const encrypted = await encryptJson(parsed, secret);
+      result.push({
+        ...record,
+        payload: {
+          ...record.payload,
+          raw_payload: encrypted,
+        },
+      });
+    } else {
+      result.push(record);
+    }
+  }
+  return result;
+}

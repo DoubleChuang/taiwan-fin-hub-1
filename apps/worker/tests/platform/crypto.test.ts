@@ -4,11 +4,9 @@ import {
   decryptPayload,
   encryptJson,
   encryptPayload,
-} from "../../src/platform/crypto";
-import {
   encryptSyncRecordsRawPayload,
-  type SyncWriteRecord,
-} from "../../src/features/sync/persistence";
+} from "../../src/platform/crypto";
+import type { SyncWriteRecord } from "../../src/features/sync/persistence";
 
 describe("crypto platform utilities", () => {
   const secretKey = "super-secret-test-key-1234567890";

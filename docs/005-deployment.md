@@ -100,19 +100,21 @@ workflow 會：
 1. 取得 `TedLin1993/all-set-tw` 的最新 `main`。
 2. 以前次同步版本為基準進行三方合併。
 3. 保留部署 repository 自己的 `.github/workflows`。
-4. 有新版本時，不再直接推送到 `main` 以避免直接部署未經審查的程式碼，而是推送到專屬同步分支並建立 GitHub Pull Request（標題如 `chore(upstream): 同步上游版本 <commit>`）。
+4. 有新版本時，不再直接推送到 `main` 以避免直接部署未經審查的程式碼，而是推送到專屬同步分支並建立 GitHub Pull Request（標題如 `chore(upstream): 同步上游版本 <commit>`）。若三方合併發生程式碼衝突，更新器會建立標題含 `[待解衝突]` 的 Draft PR；同步分支只包含乾淨的上游程式碼（保留部署 repo 的 workflows），不會寫入衝突標記，可直接使用 GitHub 的 **Resolve conflicts** 介面或在本機 `git merge` 解決，不會推入 `main`，也不會讓排程失敗。
 5. GitHub Actions 會自動執行 OpenCode 安全性審查（`scripts/review-pr-security.mjs`），稽核 PR diff（檢查未授權外部網路連線、加解密與金鑰完整性、workflow 權限與敏感憑證洩漏等），並自動在 PR 發表安全性評估報告留言。
 6. 使用者檢視審查報告並確認無誤後合併 PR 至 `main`，由 Workers Builds 重新部署。
 
 首次同步若沒有共同 Git history，更新器只會在部署內容可對應到上游版本、且 workflows 以外沒有自行修改時接軌。同步前會建立 `backup-before-first-upstream-sync` branch；同名 branch 已存在時不會覆寫。
 
-後續同步會在 commit message 記錄上游基準，不使用 force push。若本地修改與上游衝突，更新器會在推送前停止，保留目前內容供手動處理。
+後續同步會建立純上游的基準 commit 並在 commit message 記錄上游基準，不使用 force push。若本地修改與上游衝突，PR 模式會建立待解衝突的 Draft PR，可直接在 GitHub 解衝突或在本機 `git merge`；直接推送模式則會在推送前停止，保留目前內容供手動處理。衝突解除並合併後，下一次同步會以新的基準 commit 繼續。
+
+偵測到舊版同步紀錄（沒有純上游基準 commit）時，第一次會以過渡模式執行：先建立上游基準 commit，衝突檔案保留本地版本且不套用上游變更；合併後即可使用 GitHub 原生衝突解決介面。
 
 ### 更新故障排查
 
 - **Workflow 沒有執行**：確認檔案位於 `.github/workflows/sync-upstream.yml`，並檢查 Actions 是否啟用。
 - **無法推送更新或建立 PR**：確認 **Settings → Actions → General → Workflow permissions** 已選擇 **Read and write permissions** 並勾選 **Allow GitHub Actions to create and approve pull requests**。
-- **合併衝突**：從該次 Actions log 查看衝突檔案，手動合併後再重新執行。
+- **合併衝突**：開啟標題含 `[待解衝突]` 的 Draft PR，點擊 GitHub 的 **Resolve conflicts**（或在本機 `git merge origin/<同步分支>`）解決衝突，再將 PR 轉為 Ready for review。
 - **`fatal: refusing to merge unrelated histories`**：部署 repository 仍在使用舊版 workflow，請重新複製最新的 [`deploy/github/sync-upstream.yml`](../deploy/github/sync-upstream.yml)。
 - **Queue 權限錯誤**：替 Workers Builds API token 增加帳戶層級的 Queues Read 與 Queues Edit。
 
