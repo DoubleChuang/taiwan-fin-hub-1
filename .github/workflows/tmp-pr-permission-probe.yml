@@ -13,14 +13,31 @@ jobs:
   probe:
     runs-on: ubuntu-latest
     steps:
-      - name: Diagnose shell gh
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: non-draft shell PR
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          echo "shell token length: ${#GITHUB_TOKEN}"
-          gh auth status || true
-      - name: Diagnose node-spawned gh
+          git config user.name "probe"
+          git config user.email "probe@example.com"
+          git switch -c sync/probe-nondraft
+          git commit --allow-empty -m "probe non-draft"
+          git push origin HEAD:refs/heads/sync/probe-nondraft
+          gh pr create --base main --head sync/probe-nondraft --title "probe non-draft shell" --body "probe body with 中文" || echo "SHELL_NONDRAFT_FAILED"
+      - name: non-draft node spawn PR
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          node -e 'const {spawnSync}=require("child_process"); console.log("node token length:", (process.env.GITHUB_TOKEN||"").length); const r=spawnSync("gh",["auth","status"],{encoding:"utf8"}); process.stdout.write(r.stdout||""); process.stderr.write(r.stderr||""); console.log("exit", r.status);'
+          git switch -c sync/probe-nondraft-node
+          git commit --allow-empty -m "probe non-draft node"
+          git push origin HEAD:refs/heads/sync/probe-nondraft-node
+          node -e '
+            const { spawnSync } = require("child_process");
+            const args = ["pr","create","--base","main","--head","sync/probe-nondraft-node","--title","probe non-draft node","--body","line1\nline2"];
+            const r = spawnSync("gh", args, { encoding: "utf8" });
+            console.log("NODE EXIT", r.status);
+            console.log(r.stdout || "");
+            console.error(r.stderr || "");
+          '
