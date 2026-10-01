@@ -496,12 +496,17 @@ process.exit(0);
     assert.equal(result.status, 0, result.stderr);
 
     const syncBranch = `sync/upstream-${upstream.latestCommit.slice(0, 10)}`;
-    const newHead = git(runner, "rev-parse", "HEAD");
+    const pushed = remoteBranch(runner, syncBranch);
+    const baselineCommit = git(runner, "rev-parse", `${deploymentCommit}^`);
 
+    // main 與工作目錄都不會被更動；同步分支只含乾淨的上游程式碼。
     assert.equal(remoteBranch(runner, "main"), deploymentCommit);
-    assert.equal(remoteBranch(runner, syncBranch), newHead);
-    assert.match(git(runner, "show", "HEAD:app.txt"), /^<<<<<<< /m);
-    assert.match(git(runner, "show", "HEAD:app.txt"), /^>>>>>>> /m);
+    assert.equal(git(runner, "rev-parse", "HEAD"), deploymentCommit);
+    assert.equal(git(runner, "status", "--porcelain"), "");
+    assert.notEqual(pushed, deploymentCommit);
+    assert.equal(git(runner, "show", `${pushed}:app.txt`), "upstream change");
+    assert.doesNotMatch(git(runner, "show", `${pushed}:app.txt`), /<<<<<<</);
+    assert.equal(git(runner, "merge-base", "main", pushed), baselineCommit);
 
     assert.equal(
       readFileSync(outputFile, "utf8"),
@@ -523,8 +528,159 @@ process.exit(0);
     );
     const bodyIndex = prCreateCall.indexOf("--body") + 1;
     assert.match(prCreateCall[bodyIndex], /app\.txt/);
-    assert.match(prCreateCall[bodyIndex], /git switch/);
+    assert.match(prCreateCall[bodyIndex], /Resolve conflicts/);
+    assert.doesNotMatch(prCreateCall[bodyIndex], /移除 <<<<<<</);
     assert.match(result.stdout, /衝突/);
+  });
+});
+
+test("SYNC_CREATE_PR 過渡模式保留本地客製並注入純上游基準 commit", () => {
+  withTemporaryRepository((root) => {
+    const upstream = createUpstream(root, { includeSecondCommit: false });
+
+    const runner = path.join(root, "runner");
+    const originBare = path.join(root, "deployment.git");
+    initializeRepository(runner);
+    write(runner, "app.txt", "version 1\n");
+    write(runner, "local-config.txt", "local config\n");
+    git(runner, "add", "--all");
+    git(runner, "commit", "-m", "Cloudflare source repo import");
+    write(runner, "local-config.txt", "local name\n");
+    git(runner, "commit", "-am", "local customization");
+    git(
+      runner,
+      "commit",
+      "--allow-empty",
+      "-m",
+      "chore(upstream): 同步上游版本 v1",
+      "-m",
+      `Taiwan-Fin-Hub-Upstream: ${upstream.firstCommit}`,
+    );
+    const localCommit = git(runner, "rev-parse", "HEAD");
+    initializeBareRepository(originBare);
+    pushMain(runner, originBare);
+
+    write(upstream.worktree, "app.txt", "version 2\n");
+    write(upstream.worktree, "local-config.txt", "upstream name\n");
+    upstream.latestCommit = commitAll(upstream.worktree, "upstream v2");
+    git(upstream.worktree, "push", "origin", "main");
+
+    const mockGhScript = path.join(root, "mock-gh.mjs");
+    const callsLog = path.join(root, "gh-calls.json");
+    const outputFile = path.join(root, "github-output.txt");
+    writeFileSync(outputFile, "");
+    writeFileSync(
+      mockGhScript,
+      `import { appendFileSync } from "node:fs";
+const args = process.argv.slice(2);
+appendFileSync(${JSON.stringify(callsLog)}, JSON.stringify(args) + "\\n");
+if (args[0] === "--version") {
+  console.log("gh version 2.0.0 (mock)");
+  process.exit(0);
+}
+if (args[0] === "pr" && args[1] === "list") {
+  console.log("[]");
+  process.exit(0);
+}
+if (args[0] === "pr" && args[1] === "create") {
+  console.log("https://github.com/example/repo/pull/654");
+  process.exit(0);
+}
+process.exit(0);
+`,
+    );
+
+    const result = runUpdater(runner, upstream.bare, {
+      env: {
+        SYNC_CREATE_PR: "true",
+        GH_BIN: mockGhScript,
+        GITHUB_OUTPUT: outputFile,
+      },
+    });
+
+    assert.equal(result.status, 0, result.stderr);
+
+    const syncBranch = `sync/upstream-${upstream.latestCommit.slice(0, 10)}`;
+    const pushed = remoteBranch(runner, syncBranch);
+    assert.notEqual(pushed, "");
+    assert.equal(remoteBranch(runner, "main"), localCommit);
+
+    // 過渡模式：分支保留本地客製，且沒有衝突標記。
+    assert.equal(
+      git(runner, "show", `${pushed}:local-config.txt`),
+      "local name",
+    );
+    assert.equal(git(runner, "show", `${pushed}:app.txt`), "version 2");
+    assert.doesNotMatch(
+      git(runner, "show", `${pushed}:local-config.txt`),
+      /<<<<<<</,
+    );
+
+    // 分支上包含純上游 tree 的基準 commit，parent 指向目前的 HEAD。
+    const baselineRecord = git(runner, "rev-parse", `${pushed}^`);
+    assert.equal(
+      git(runner, "show", "-s", "--format=%T", baselineRecord),
+      git(runner, "show", "-s", "--format=%T", upstream.latestCommit),
+    );
+    assert.equal(git(runner, "rev-parse", `${baselineRecord}^`), localCommit);
+
+    const calls = readFileSync(callsLog, "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    const prCreateCall = calls.find((c) => c[0] === "pr" && c[1] === "create");
+    assert.ok(prCreateCall);
+    assert.ok(!prCreateCall.includes("--draft"));
+    const titleIndex = prCreateCall.indexOf("--title") + 1;
+    assert.doesNotMatch(prCreateCall[titleIndex], /\[待解衝突\]/);
+    const bodyIndex = prCreateCall.indexOf("--body") + 1;
+    assert.match(prCreateCall[bodyIndex], /過渡基準/);
+    assert.match(prCreateCall[bodyIndex], /local-config\.txt/);
+
+    // 模擬合併 PR 後，下一次同步以基準 commit 為 merge base 並原生顯示衝突。
+    git(runner, "merge", "--no-ff", "-m", "Merge sync PR", pushed);
+    git(runner, "push", "origin", "main");
+    write(upstream.worktree, "local-config.txt", "upstream name v3\n");
+    upstream.latestCommit = commitAll(upstream.worktree, "upstream v3");
+    git(upstream.worktree, "push", "origin", "main");
+    writeFileSync(callsLog, "");
+
+    const second = runUpdater(runner, upstream.bare, {
+      env: {
+        SYNC_CREATE_PR: "true",
+        GH_BIN: mockGhScript,
+        GITHUB_OUTPUT: outputFile,
+      },
+    });
+
+    assert.equal(second.status, 0, second.stderr);
+    const secondBranch = `sync/upstream-${upstream.latestCommit.slice(0, 10)}`;
+    const secondPushed = remoteBranch(runner, secondBranch);
+    assert.equal(
+      git(runner, "merge-base", "main", secondPushed),
+      baselineRecord,
+    );
+    assert.equal(
+      git(runner, "show", `${secondPushed}:local-config.txt`),
+      "upstream name v3",
+    );
+    assert.doesNotMatch(
+      git(runner, "show", `${secondPushed}:local-config.txt`),
+      /<<<<<<</,
+    );
+    const secondCalls = readFileSync(callsLog, "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    const secondPrCall = secondCalls.find(
+      (c) => c[0] === "pr" && c[1] === "create",
+    );
+    assert.ok(secondPrCall.includes("--draft"));
+    const secondTitleIndex = secondPrCall.indexOf("--title") + 1;
+    assert.match(secondPrCall[secondTitleIndex], /\[待解衝突\]/);
+    const secondBodyIndex = secondPrCall.indexOf("--body") + 1;
+    assert.match(secondPrCall[secondBodyIndex], /local-config\.txt/);
+    assert.match(secondPrCall[secondBodyIndex], /Resolve conflicts/);
   });
 });
 
@@ -705,13 +861,53 @@ process.exit(0);
     assert.equal(result.status, 0, result.stderr);
 
     const syncBranch = `sync/upstream-${upstream.latestCommit.slice(0, 10)}`;
-    const newHead = git(deployment.worktree, "rev-parse", "HEAD");
+    const pushed = remoteBranch(deployment.worktree, syncBranch);
 
     assert.equal(
       remoteBranch(deployment.worktree, "main"),
       deployment.beforeSync,
     );
-    assert.equal(remoteBranch(deployment.worktree, syncBranch), newHead);
+    assert.equal(
+      git(deployment.worktree, "rev-parse", "HEAD"),
+      deployment.beforeSync,
+    );
+    assert.equal(
+      git(deployment.worktree, "merge-base", "main", pushed),
+      deployment.rootCommit,
+    );
+    assert.equal(
+      git(deployment.worktree, "show", `${pushed}:app.txt`),
+      "version 2",
+    );
+    assert.equal(
+      git(deployment.worktree, "show", `${pushed}:new-in-v2.txt`),
+      "new",
+    );
+    assert.equal(
+      git(
+        deployment.worktree,
+        "show",
+        `${pushed}:.github/workflows/sync-upstream.yml`,
+      ),
+      "name: manually installed updater",
+    );
+    assert.equal(
+      git(
+        deployment.worktree,
+        "ls-tree",
+        "--name-only",
+        pushed,
+        ".github/workflows/ci.yml",
+      ),
+      "",
+    );
+    assert.notEqual(
+      run("git", ["cat-file", "-e", `${pushed}:removed-after-v1.txt`], {
+        cwd: deployment.worktree,
+        allowFailure: true,
+      }).status,
+      0,
+    );
 
     assert.equal(
       readFileSync(outputFile, "utf8"),
@@ -803,13 +999,20 @@ process.exit(0);
     assert.equal(result.status, 0, result.stderr);
 
     const syncBranch = `sync/upstream-${upstream.latestCommit.slice(0, 10)}`;
-    const newHead = git(deployment.worktree, "rev-parse", "HEAD");
+    const pushed = remoteBranch(deployment.worktree, syncBranch);
 
     assert.equal(
       remoteBranch(deployment.worktree, "main"),
       deployment.beforeSync,
     );
-    assert.equal(remoteBranch(deployment.worktree, syncBranch), newHead);
+    assert.equal(
+      git(deployment.worktree, "rev-parse", "HEAD"),
+      deployment.beforeSync,
+    );
+    assert.equal(
+      git(deployment.worktree, "merge-base", "main", pushed),
+      deployment.rootCommit,
+    );
 
     assert.equal(
       readFileSync(outputFile, "utf8"),
