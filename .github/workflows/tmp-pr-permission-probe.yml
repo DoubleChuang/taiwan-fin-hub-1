@@ -1,0 +1,30 @@
+name: tmp pr permission probe
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Show token identity
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh api user --jq .login
+      - name: Try creating a PR with GITHUB_TOKEN
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config user.name "probe"
+          git config user.email "probe@example.com"
+          git switch -c tmp/probe-head
+          git commit --allow-empty -m "probe: token pr permission"
+          git push origin tmp/probe-head
+          gh pr create --base main --head tmp/probe-head --title "probe: actions token PR permission" --body "temporary diagnostic PR" --draft
