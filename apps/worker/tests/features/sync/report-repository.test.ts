@@ -136,6 +136,14 @@ describe("scheduled sync financial reports", () => {
       creditCardDebtTwd: 1200,
       missingCurrencies: [],
     });
+    database.exec(
+      "UPDATE bank_balance_snapshots SET balance = 137 WHERE id = 'card-new'",
+    );
+    await expect(calculateCurrentFinancialSnapshot(db)).resolves.toEqual({
+      assetsTwd: 10_300,
+      creditCardDebtTwd: -137,
+      missingCurrencies: [],
+    });
   });
 
   it("values foreign-currency items at zero when their exchange rate is missing", async () => {

@@ -257,7 +257,7 @@ describe("sinopac App JSON parser", () => {
     ["0", -10000, false],
     ["3000", -7000, false],
     ["10000", 0, true],
-    ["12000", 0, true],
+    ["12000", 2000, true],
     ["-", undefined, undefined],
   ])(
     "uses per-currency statement and payment amounts (%s)",
@@ -311,6 +311,97 @@ describe("sinopac App JSON parser", () => {
       }),
     ).toThrow("帳務資訊格式不完整");
   });
+
+  it.each(["000", "392"])(
+    "preserves a negative statement as credit for currency %s",
+    (currencyCode) => {
+      const currency = currencyCode === "000" ? "TWD" : "JPY";
+      const result = parseSinopacCardData({
+        summary: summaryPayload,
+        bills: billPayload,
+        accountingInfo: {
+          Result: {
+            BaseData: { STMTDATE: "20260723", DUEDATE: "20260807" },
+            BillAmounts: [
+              {
+                CurrencyCode: currencyCode,
+                CURRBAL: "-137",
+                DUEAMT: "0",
+                TotalPaymentAmt: "0",
+              },
+            ],
+          },
+        },
+      });
+      expect(
+        result.creditCardBills.find((bill) => bill.currency === currency),
+      ).toMatchObject({ statementAmount: -137, isPaid: true });
+      expect(
+        result.bankBalanceSnapshots.find(
+          (snapshot) => snapshot.currency === currency,
+        ),
+      ).toMatchObject({
+        balance: 137,
+        statementBalance: -137,
+        noPaymentNeeded: true,
+      });
+    },
+  );
+
+  it("preserves a negative summary without cumulative payment information", () => {
+    const result = parseSinopacCardData({
+      bills: [],
+      summary: [
+        {
+          CreditSum: [
+            { DataText: "本期應繳金額", DataValue: "-137" },
+            { DataText: "繳款狀態", DataValue: "無需繳款" },
+          ],
+        },
+      ],
+      accountingInfo: {
+        Result: {
+          BaseData: { STMTDATE: "20260723", DUEDATE: "20260807" },
+          BillAmounts: [
+            { CurrencyCode: "000", CURRBAL: "-137", TotalPaymentAmt: "-" },
+          ],
+        },
+      },
+    });
+    expect(result.creditCardBills[0]).toMatchObject({
+      statementAmount: -137,
+      isPaid: true,
+    });
+    expect(result.bankBalanceSnapshots[0]).toMatchObject({
+      balance: 137,
+      statementBalance: -137,
+      noPaymentNeeded: true,
+    });
+  });
+
+  it.each([
+    ["invalid", "-137", "0"],
+    ["20260723", "invalid", "0"],
+    ["20260723", "137", "-1"],
+  ])(
+    "still rejects invalid dates, amounts and negative payments",
+    (date, amount, paid) => {
+      expect(() =>
+        parseSinopacCardData({
+          summary: [],
+          bills: [],
+          accountingInfo: {
+            Result: {
+              BaseData: { STMTDATE: date },
+              BillAmounts: [
+                { CurrencyCode: "000", CURRBAL: amount, TotalPaymentAmt: paid },
+              ],
+            },
+          },
+        }),
+      ).toThrow("永豐帳務資訊日期或金額格式不完整。");
+    },
+  );
 
   it("keeps unbilled JPY liability when the current statement contains only TWD", () => {
     const result = parseSinopacCardData({

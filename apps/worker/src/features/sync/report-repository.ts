@@ -316,7 +316,7 @@ export async function calculateCurrentFinancialSnapshot(
        )
        SELECT
          COALESCE(ROUND(SUM(CASE WHEN kind = 'asset' THEN amount_twd ELSE 0 END)), 0) AS assetsTwd,
-         COALESCE(ROUND(SUM(CASE WHEN kind = 'debt' THEN ABS(amount_twd) ELSE 0 END)), 0) AS creditCardDebtTwd,
+         COALESCE(ROUND(SUM(CASE WHEN kind = 'debt' THEN -amount_twd ELSE 0 END)), 0) AS creditCardDebtTwd,
          COALESCE(
            json_group_array(DISTINCT currency) FILTER (
              WHERE (

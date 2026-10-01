@@ -27,6 +27,7 @@ import {
   RakutenSessionConflictError,
   RakutenVerificationRequiredError,
   runRakutenOcrAttempts,
+  shiftRakutenMonthLabel,
 } from "../../src/connectors/rakuten";
 
 const LOGIN_URL = "https://www.rakuten-bank.com.tw/ebank/cgn/cgnot0001/010";
@@ -61,6 +62,72 @@ const DEFAULT_DASHBOARD_RS_DATA = {
   },
 };
 
+const DEPOSIT_ACCOUNT_NO = "0081200000001234";
+
+/** 臺幣活存明細（CTWQU0001）回應：欄位形狀同正式環境，值為合成資料。 */
+function depositTxnRsData(
+  txDetails: Array<{
+    sysDate: string;
+    sysTime: string;
+    credit: boolean;
+    amt: string;
+    balance: string;
+    txDesc: string;
+    pk: string;
+  }>,
+  display: Record<string, boolean> = {},
+) {
+  return {
+    display: { dataEnd: true, dataLimit: false, noData: false, ...display },
+    accounts: [{ acctNo: DEPOSIT_ACCOUNT_NO, balance: "52,345" }],
+    queryAccountNo: DEPOSIT_ACCOUNT_NO,
+    // 新的在前；amtSign true 代表收入（測試假設，解析器由餘額差確認）
+    txDetails: txDetails.map((row) => ({
+      sysDate: row.sysDate,
+      sysTime: row.sysTime,
+      amtSign: row.credit,
+      amt: row.amt,
+      memo: "",
+      txDesc: row.txDesc,
+      nickNameOrAcct: "",
+      acctNo: "",
+      bankId: "",
+      balance: row.balance,
+      pk: row.pk,
+    })),
+  };
+}
+
+function monthRows(month: string, opening: number, pkSeed: number) {
+  const autoDebit = {
+    sysDate: `${month}/17`,
+    sysTime: "08:30",
+    credit: false,
+    amt: "6,543",
+    balance: (opening - 6_543).toLocaleString("en-US"),
+    txDesc: "自動扣款",
+    pk: `${pkSeed}0000000000002`,
+  };
+  const transfer = {
+    sysDate: `${month}/03`,
+    sysTime: "10:00",
+    credit: true,
+    amt: "10,000",
+    balance: opening.toLocaleString("en-US"),
+    txDesc: "他行轉入",
+    pk: `${pkSeed}0000000000001`,
+  };
+  return [autoDebit, transfer];
+}
+
+const DEFAULT_DEPOSIT_TXN_CURRENT = depositTxnRsData(
+  monthRows("2026/09", 58_888, 9),
+);
+const DEFAULT_DEPOSIT_TXN_MONTHS: Record<string, unknown> = {
+  "2026/08 活存明細": depositTxnRsData(monthRows("2026/08", 35_431, 8)),
+  "2026/07 活存明細": depositTxnRsData(monthRows("2026/07", 21_974, 7)),
+};
+
 type PageState = {
   navClicks?: Array<{ exact?: string }>;
   sessionExpired?: boolean;
@@ -75,6 +142,23 @@ type PageState = {
   tapDashboard?: unknown;
   logoutClicked?: boolean;
   logoutConfirmed?: boolean;
+  /** 臺幣存款頁當月明細（CTWQU0001/010）；null 表示網頁沒有送出。 */
+  tapDepositCurrent?: unknown;
+  /** 月份下拉選單的選項（「YYYY/MM 活存明細」→ CTWQU0001/011 回應）。 */
+  tapDepositMonths?: Record<string, unknown>;
+  /** 下拉按鈕目前顯示的月份文字。 */
+  depositMonthLabel?: string;
+  /** 已送出的活存明細回應（依送出順序）。 */
+  depositResponses?: Array<{ path: string; rsData: unknown }>;
+  monthClicks?: Array<{ action: string; label?: string }>;
+  /** 頁面內執行的月份下拉函式（測試用假 DOM 直接執行它）。 */
+  monthSelectFn?: (spec: unknown) => unknown;
+  /** 月份下拉按鈕前 N 次 toggle 還沒渲染（模擬 Angular 延遲渲染）。 */
+  monthToggleMisses?: number;
+  /** 讀到首頁存款回應（首頁存款步驟完成）之後呼叫（測試用來推進時間）。 */
+  onDashboardRead?: () => void;
+  /** 點下「臺幣存款」之後呼叫（測試用來推進時間）。 */
+  onDepositOpened?: () => void;
 };
 
 function makePage(overrides?: Partial<PageState>) {
@@ -83,6 +167,11 @@ function makePage(overrides?: Partial<PageState>) {
     captchaDataUri: "data:image/png;base64,AQID",
     loginClicked: 0,
     tapDashboard: DEFAULT_DASHBOARD_RS_DATA,
+    tapDepositCurrent: DEFAULT_DEPOSIT_TXN_CURRENT,
+    tapDepositMonths: DEFAULT_DEPOSIT_TXN_MONTHS,
+    depositMonthLabel: "2026/09 活存明細",
+    depositResponses: [],
+    monthClicks: [],
     ...overrides,
   };
 
@@ -110,10 +199,13 @@ function makePage(overrides?: Partial<PageState>) {
           if (state.tapDashboard != null) {
             entries.push({ path: "CHMQU0001", rsData: state.tapDashboard });
           }
+          // 臺幣存款頁的活存明細回應：依點擊順序附在最後
+          entries.push(...(state.depositResponses ?? []));
           const suffix = String(input.suffix ?? "");
           const afterIndex = input.afterIndex ?? 0;
           for (let i = entries.length - 1; i >= afterIndex; i -= 1) {
             if (!suffix.includes(entries[i]!.path)) continue;
+            if (entries[i]!.path === "CHMQU0001") state.onDashboardRead?.();
             return { count: entries.length, rsData: entries[i]!.rsData };
           }
           return { count: entries.length, rsData: null };
@@ -143,6 +235,40 @@ function makePage(overrides?: Partial<PageState>) {
           state.onLoginClick?.(state.loginClicked);
           return undefined;
         }
+        if (source.includes("rakuten-month-select")) {
+          // 月份下拉選單：toggle 點開按鈕，choose 點選項（送出 CTWQU0001/011）
+          state.monthSelectFn = fn as (spec: unknown) => unknown;
+          const spec = (arg ?? {}) as { action: string; label?: string };
+          state.monthClicks = [...(state.monthClicks ?? []), spec];
+          const onDepositPage = state.currentUrl === TWD_DEPOSIT_URL;
+          if (spec.action === "toggle") {
+            if ((state.monthToggleMisses ?? 0) > 0) {
+              state.monthToggleMisses = (state.monthToggleMisses ?? 0) - 1;
+              return { label: "", clicked: false, labelShapedCount: 0 };
+            }
+            return {
+              label: onDepositPage
+                ? (/\d{4}\/\d{2}/.exec(state.depositMonthLabel ?? "")?.[0] ??
+                  "")
+                : "",
+              clicked: onDepositPage,
+              labelShapedCount: onDepositPage ? 4 : 0,
+            };
+          }
+          const options = state.tapDepositMonths ?? {};
+          const label = String(spec.label ?? "");
+          if (!onDepositPage || !(label in options)) {
+            return { label: "", clicked: false, labelShapedCount: 4 };
+          }
+          state.depositMonthLabel = label;
+          if (options[label] != null) {
+            state.depositResponses = [
+              ...(state.depositResponses ?? []),
+              { path: "CTWQU0001/011", rsData: options[label] },
+            ];
+          }
+          return { label: "", clicked: true, labelShapedCount: 4 };
+        }
         if (source.includes("rakuten-nav-click")) {
           // SPA 選單點擊：依使用者操作路徑切頁，不整頁重載。
           const spec = (arg ?? {}) as { exact?: string };
@@ -155,6 +281,13 @@ function makePage(overrides?: Partial<PageState>) {
           }
           if (spec.exact === "臺幣存款" || spec.exact === "存款") {
             state.currentUrl = TWD_DEPOSIT_URL;
+            if (spec.exact === "臺幣存款") state.onDepositOpened?.();
+            if (spec.exact === "臺幣存款" && state.tapDepositCurrent != null) {
+              state.depositResponses = [
+                ...(state.depositResponses ?? []),
+                { path: "CTWQU0001/010", rsData: state.tapDepositCurrent },
+              ];
+            }
             return true;
           }
           return false;
@@ -1150,8 +1283,19 @@ describe("Rakuten log levels and sync summary", () => {
       ocrAttempts: 1,
       depositSource: "tap",
       depositAccountCount: 1,
+      depositTxnMonthsFetched: 3,
+      depositTxnCount: 6,
       durationMs: expect.any(Number),
+      loginMs: expect.any(Number),
+      dashboardMs: expect.any(Number),
+      depositTxnMs: expect.any(Number),
+      logoutMs: expect.any(Number),
     });
+    for (const key of ["loginMs", "dashboardMs", "depositTxnMs", "logoutMs"]) {
+      const value = summaries[0][key];
+      expect(Number.isInteger(value)).toBe(true);
+      expect(value as number).toBeGreaterThanOrEqual(0);
+    }
     warn.mockRestore();
     log.mockRestore();
   });
@@ -1185,7 +1329,12 @@ describe("Rakuten log levels and sync summary", () => {
       loginMode: "ocr",
       ocrAttempts: 2,
       depositSource: "none",
+      // 沒走到的階段維持 0；沒登入成功就不登出
+      dashboardMs: 0,
+      depositTxnMs: 0,
+      logoutMs: 0,
     });
+    expect(summary?.loginMs).toEqual(expect.any(Number));
     // 只有 OCR 驗證碼錯誤那一次是 warn
     expect(parsedEvents(warn).map((event) => event.event)).toEqual([
       "rakuten_ocr_attempt_failed",
@@ -1586,4 +1735,596 @@ describe("runRakutenOcrAttempts", () => {
     expect((error as Error).message).toContain("1 次");
     expect(attempt).toHaveBeenCalledOnce();
   });
+});
+
+describe("shiftRakutenMonthLabel", () => {
+  it("moves back across month and year boundaries", () => {
+    expect(shiftRakutenMonthLabel("2026/09 活存明細", 1)).toBe("2026/08");
+    expect(shiftRakutenMonthLabel("2026/09 活存明細", 2)).toBe("2026/07");
+    expect(shiftRakutenMonthLabel("2026/01 活存明細", 1)).toBe("2025/12");
+    expect(shiftRakutenMonthLabel("2026/02", 3)).toBe("2025/11");
+    expect(shiftRakutenMonthLabel("活存明細", 1)).toBeUndefined();
+  });
+});
+
+describe("Rakuten month dropdown (runs inside the bank page)", () => {
+  type FakeEl = {
+    tag: string;
+    className: string;
+    textContent: string;
+    innerText?: string;
+    attrs: Record<string, string>;
+    inMenu: boolean;
+    inModal: boolean;
+    expanded: boolean;
+    clicked: number;
+    children: FakeEl[];
+    parent?: FakeEl;
+    matches: (selector: string) => boolean;
+    closest: (selector: string) => FakeEl | null;
+    contains: (other: FakeEl) => boolean;
+    querySelector: (selector: string) => FakeEl | null;
+    getAttribute: (name: string) => string | null;
+    click: () => void;
+  };
+
+  function el(
+    tag: string,
+    text: string,
+    options: {
+      className?: string;
+      attrs?: Record<string, string>;
+      inMenu?: boolean;
+      inModal?: boolean;
+      expanded?: boolean;
+      children?: FakeEl[];
+    } = {},
+  ): FakeEl {
+    const element: FakeEl = {
+      tag,
+      className: options.className ?? "",
+      textContent: text,
+      attrs: options.attrs ?? {},
+      inMenu: options.inMenu ?? false,
+      inModal: options.inModal ?? false,
+      expanded: options.expanded ?? false,
+      clicked: 0,
+      children: options.children ?? [],
+      matches: (selector) =>
+        selector.split(",").some((part) => {
+          const trimmed = part.trim();
+          return trimmed === tag || trimmed === `.${element.className}`;
+        }),
+      closest: (selector) => {
+        // 依序往上找：自己、父層…（模擬 DOM closest）
+        for (let node: FakeEl | undefined = element; node; node = node.parent) {
+          if (selector === ".modal" && node.inModal) return node;
+          if (selector.includes(".dropdown-menu") && node.inMenu) return node;
+          if (
+            selector.includes("button") &&
+            (node.matches(selector) || node.attrs.role === "option")
+          ) {
+            return node;
+          }
+        }
+        return null;
+      },
+      contains: (other) => {
+        for (let node: FakeEl | undefined = other; node; node = node.parent) {
+          if (node === element) return true;
+        }
+        return false;
+      },
+      querySelector: () => element.children[0] ?? null,
+      getAttribute: (name) =>
+        name === "aria-expanded"
+          ? String(element.expanded)
+          : (element.attrs[name] ?? null),
+      click: () => {
+        element.clicked += 1;
+      },
+    };
+    for (const child of element.children) child.parent = element;
+    return element;
+  }
+
+  async function captureFn() {
+    const browserPage = makePage({
+      onLoginClick: () => {
+        browserPage.state.currentUrl = HOME_URL;
+      },
+    });
+    puppeteerMock.launch.mockResolvedValue(browser(browserPage));
+    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    await createRakutenConnector(
+      {} as Fetcher,
+      vi.fn().mockResolvedValue("36CY"),
+    ).sync(credentials);
+    log.mockRestore();
+    return browserPage.state.monthSelectFn!;
+  }
+
+  it("opens the toggle and picks the wanted option inside the menu, never one in a modal", async () => {
+    const run = await captureFn();
+    const toggle = el("button", " 2026/09  活存明細 ");
+    const optionLink = el("a", "2026/08 活存明細", { inMenu: true });
+    const optionItem = el("li", "2026/08 活存明細", {
+      inMenu: true,
+      children: [optionLink],
+    });
+    const otherOption = el("a", "2026/07 活存明細", { inMenu: true });
+    const modalOption = el("a", "2026/08 活存明細", { inModal: true });
+    const unrelated = el("a", "臺幣存款");
+    const globals = globalThis as unknown as Record<string, unknown>;
+    const previous = globals.document;
+    globals.document = {
+      querySelectorAll: () => [
+        toggle,
+        optionItem,
+        otherOption,
+        modalOption,
+        unrelated,
+      ],
+    };
+    try {
+      expect(run({ action: "toggle" })).toEqual({
+        label: "2026/09",
+        clicked: true,
+        labelShapedCount: 3,
+      });
+      expect(toggle.clicked).toBe(1);
+      expect(run({ action: "choose", label: "2026/08 活存明細" })).toEqual({
+        label: "",
+        clicked: true,
+        labelShapedCount: 3,
+      });
+      // li 內有連結時點連結；彈出視窗與其他月份都不會被點
+      expect(optionLink.clicked).toBe(1);
+      expect(optionItem.clicked).toBe(0);
+      expect(modalOption.clicked).toBe(0);
+      expect(otherOption.clicked).toBe(0);
+      expect(toggle.clicked).toBe(1);
+      expect(
+        run({ action: "choose", label: "2025/01 活存明細" }),
+      ).toMatchObject({ clicked: false });
+    } finally {
+      globals.document = previous;
+    }
+  });
+
+  it("does not click a toggle that is already expanded and reports a missing toggle", async () => {
+    const run = await captureFn();
+    const toggle = el("button", "2026/09 活存明細", { expanded: true });
+    const globals = globalThis as unknown as Record<string, unknown>;
+    const previous = globals.document;
+    try {
+      globals.document = { querySelectorAll: () => [toggle] };
+      expect(run({ action: "toggle" })).toMatchObject({ clicked: true });
+      expect(toggle.clicked).toBe(0);
+      globals.document = { querySelectorAll: () => [] };
+      expect(run({ action: "toggle" })).toEqual({
+        label: "",
+        clicked: false,
+        labelShapedCount: 0,
+      });
+    } finally {
+      globals.document = previous;
+    }
+  });
+  async function withDocument<T>(
+    elements: () => FakeEl[],
+    body: (run: (spec: unknown) => unknown) => T,
+  ) {
+    const run = await captureFn();
+    const globals = globalThis as unknown as Record<string, unknown>;
+    const previous = globals.document;
+    globals.document = { querySelectorAll: () => elements() };
+    try {
+      return body(run);
+    } finally {
+      globals.document = previous;
+    }
+  }
+
+  it("finds nothing until the button renders, then clicks it (caller polls)", async () => {
+    const toggle = el("button", "2026/09 活存明細");
+    let rendered = false;
+    await withDocument(
+      () => (rendered ? [toggle] : []),
+      (run) => {
+        expect(run({ action: "toggle" })).toEqual({
+          label: "",
+          clicked: false,
+          labelShapedCount: 0,
+        });
+        expect(toggle.clicked).toBe(0);
+        rendered = true;
+        expect(run({ action: "toggle" })).toEqual({
+          label: "2026/09",
+          clicked: true,
+          labelShapedCount: 1,
+        });
+        expect(toggle.clicked).toBe(1);
+      },
+    );
+  });
+
+  it("matches a toggle whose text has caret/icon text, zero-width chars and a nested label", async () => {
+    const inner = el("span", "2026/09\u200b 活存明細");
+    const toggle = el("button", "\ue5cf 2026/09 活存明細 ▼", {
+      children: [inner],
+    });
+    const labelled = el("button", "", {
+      attrs: { "aria-label": "2026/09 活存明細" },
+    });
+    await withDocument(
+      () => [toggle, inner],
+      (run) => {
+        expect(run({ action: "toggle" })).toEqual({
+          label: "2026/09",
+          clicked: true,
+          labelShapedCount: 1,
+        });
+        // 內層 span 才是最內層符合者，點的是它所屬的 button，而且只點一次
+        expect(toggle.clicked).toBe(1);
+        expect(inner.clicked).toBe(0);
+      },
+    );
+    await withDocument(
+      () => [labelled],
+      (run) => {
+        expect(run({ action: "toggle" })).toMatchObject({
+          label: "2026/09",
+          clicked: true,
+        });
+        expect(labelled.clicked).toBe(1);
+      },
+    );
+  });
+
+  it("picks options rendered as <a class=combo-item> and never re-clicks the toggle", async () => {
+    const toggle = el("button", "2026/09 活存明細");
+    const options = ["2026/09", "2026/08", "2026/07"].map((month) =>
+      el("a", `${month} 活存明細`, {
+        className: "combo-item",
+        attrs: { role: "combo-item" },
+      }),
+    );
+    await withDocument(
+      () => [toggle, ...options],
+      (run) => {
+        expect(run({ action: "choose", label: "2026/08 活存明細" })).toEqual({
+          label: "",
+          clicked: true,
+          labelShapedCount: 4,
+        });
+        expect(options[1]!.clicked).toBe(1);
+        expect(options[0]!.clicked).toBe(0);
+        expect(options[2]!.clicked).toBe(0);
+        expect(toggle.clicked).toBe(0);
+        // 目標與按鈕同月份時也不會點按鈕本身
+        expect(
+          run({ action: "choose", label: "2026/09 活存明細" }),
+        ).toMatchObject({ clicked: true });
+        expect(toggle.clicked).toBe(0);
+        expect(options[0]!.clicked).toBe(1);
+      },
+    );
+  });
+});
+
+describe("Rakuten TWD deposit transactions (CTWQU0001)", () => {
+  function events(spy: { mock: { calls: unknown[][] } }) {
+    return spy.mock.calls.flatMap(([value]) => {
+      try {
+        const parsed: unknown = JSON.parse(String(value));
+        return parsed && typeof parsed === "object"
+          ? [parsed as Record<string, unknown>]
+          : [];
+      } catch {
+        return [];
+      }
+    });
+  }
+
+  async function syncWith(overrides: Partial<PageState> = {}) {
+    const browserPage = makePage({
+      onLoginClick: () => {
+        browserPage.state.currentUrl = HOME_URL;
+      },
+      ...overrides,
+    });
+    const browserInstance = browser(browserPage);
+    puppeteerMock.launch.mockResolvedValue(browserInstance);
+    const result = await createRakutenConnector(
+      {} as Fetcher,
+      vi.fn().mockResolvedValue("36CY"),
+    ).sync(credentials);
+    return { browserPage, browserInstance, result };
+  }
+
+  it("opens 存款 → 臺幣存款 after the dashboard step and reads three months through the dropdown", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const { browserPage, browserInstance, result } = await syncWith();
+
+    const clicks = (browserPage.state.navClicks ?? []).map(
+      (click) => click.exact,
+    );
+    const deposit = clicks.indexOf("存款");
+    expect(deposit).toBeGreaterThanOrEqual(0);
+    expect(clicks[deposit + 1]).toBe("臺幣存款");
+    // 首頁存款讀到之後才進入明細，登出排在最後
+    expect(clicks.at(-1)).toBe("登出");
+    // 下拉按鈕顯示 2026/09，往前選 2026/08、2026/07
+    expect(
+      (browserPage.state.monthClicks ?? []).filter(
+        (click) => click.action === "choose",
+      ),
+    ).toEqual([
+      { action: "choose", label: "2026/08 活存明細" },
+      { action: "choose", label: "2026/07 活存明細" },
+    ]);
+
+    expect(result.bankTransactions).toHaveLength(6);
+    expect(
+      result.bankTransactions?.every(
+        (tx) => tx.accountId === `bank:rakuten:${DEPOSIT_ACCOUNT_NO}:TWD`,
+      ),
+    ).toBe(true);
+    const autoDebits = result.bankTransactions?.filter(
+      (tx) => tx.description === "自動扣款",
+    );
+    expect(autoDebits).toHaveLength(3);
+    expect(autoDebits?.every((tx) => tx.amount === -6_543)).toBe(true);
+    // 餘額照常
+    expect(result.bankAccounts?.map((account) => account.accountType)).toEqual([
+      "savings",
+    ]);
+    expect(result).not.toHaveProperty("transactionStats");
+    expect(warn).not.toHaveBeenCalled();
+    // 一律 close，不 disconnect
+    expect(browserInstance.close).toHaveBeenCalledOnce();
+    expect(browserInstance.disconnect).not.toHaveBeenCalled();
+    // 存款頁登出前的確認也照常
+    expect(browserPage.state.logoutConfirmed).toBe(true);
+    warn.mockRestore();
+    log.mockRestore();
+  }, 20_000);
+
+  it("never logs account numbers, balances or amounts while syncing transactions", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    await syncWith();
+    const output = [...log.mock.calls, ...warn.mock.calls]
+      .map(([value]) => String(value))
+      .join("\n");
+    for (const secret of [DEPOSIT_ACCOUNT_NO, "52,345", "52345", "6,543"]) {
+      expect(output).not.toContain(secret);
+    }
+    warn.mockRestore();
+    log.mockRestore();
+  }, 20_000);
+
+  it("keeps the months it has when a dropdown option is missing and logs count-only events", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const { result, browserInstance } = await syncWith({
+      tapDepositMonths: {},
+    });
+    expect(result.bankTransactions).toHaveLength(2);
+    expect(result.bankAccounts?.length).toBe(1);
+    expect(events(warn)).toContainEqual({
+      event: "rakuten_tx_fetch_skipped",
+      reason: "month_option_missing",
+      labelShapedCount: 4,
+    });
+    expect(browserInstance.close).toHaveBeenCalledOnce();
+    warn.mockRestore();
+    log.mockRestore();
+  }, 20_000);
+
+  it("keeps polling for a month dropdown that renders late instead of giving up", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const { browserPage, result } = await syncWith({ monthToggleMisses: 3 });
+    const toggles = (browserPage.state.monthClicks ?? []).filter(
+      (click) => click.action === "toggle",
+    );
+    // 前 3 次沒找到，之後的 2 個月份各 1 次
+    expect(toggles).toHaveLength(5);
+    expect(result.bankTransactions).toHaveLength(6);
+    expect(
+      events(warn).filter((event) => event.reason === "month_dropdown_missing"),
+    ).toEqual([]);
+    warn.mockRestore();
+    log.mockRestore();
+  }, 20_000);
+
+  it("gives up with a count-only event when the month dropdown never renders", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const { result } = await syncWith({ monthToggleMisses: 1_000 });
+    expect(result.bankTransactions).toHaveLength(2);
+    expect(events(warn)).toContainEqual({
+      event: "rakuten_tx_fetch_skipped",
+      reason: "month_dropdown_missing",
+      labelShapedCount: 0,
+    });
+    warn.mockRestore();
+    log.mockRestore();
+  }, 20_000);
+
+  it("stops fetching older months when time is short instead of failing the sync", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const realNow = Date.now.bind(Date);
+    let offset = 0;
+    const nowSpy = vi
+      .spyOn(Date, "now")
+      .mockImplementation(() => realNow() + offset);
+    try {
+      const { result, browserPage } = await syncWith({
+        // 當月讀到之後，時間已接近明細專用的 75 秒上限（扣掉登出保留的 8 秒）
+        onDepositOpened: () => {
+          offset = 68_000;
+        },
+      });
+      expect(result.bankTransactions).toHaveLength(2);
+      expect(browserPage.state.monthClicks ?? []).toEqual([]);
+      expect(events(warn)).toContainEqual({
+        event: "rakuten_tx_fetch_skipped",
+        reason: "out_of_time",
+        monthsFetched: 1,
+        monthsWanted: 3,
+      });
+      expect(result.bankAccounts?.length).toBe(1);
+    } finally {
+      nowSpy.mockRestore();
+      warn.mockRestore();
+      log.mockRestore();
+    }
+  }, 20_000);
+
+  it("still fetches transactions when login and dashboard already used more than 55 - 8 - 5 seconds", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const realNow = Date.now.bind(Date);
+    let offset = 0;
+    const nowSpy = vi
+      .spyOn(Date, "now")
+      .mockImplementation(() => realNow() + offset);
+    try {
+      const { result, browserPage } = await syncWith({
+        // 首頁存款步驟後已過 45 秒：若明細沿用 55 秒期限，只剩 2 秒而被略過
+        onDashboardRead: () => {
+          offset = 45_000;
+        },
+      });
+      expect(result.bankTransactions).toHaveLength(6);
+      expect(
+        (browserPage.state.monthClicks ?? []).filter(
+          (click) => click.action === "choose",
+        ),
+      ).toHaveLength(2);
+      expect(
+        events(warn).filter(
+          (event) => event.event === "rakuten_tx_fetch_skipped",
+        ),
+      ).toEqual([]);
+      expect(browserPage.state.logoutConfirmed).toBe(true);
+    } finally {
+      nowSpy.mockRestore();
+      warn.mockRestore();
+      log.mockRestore();
+    }
+  }, 20_000);
+
+  it("does not throw a deadline error when parsing fallbacks run after a long transaction step", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const realNow = Date.now.bind(Date);
+    let offset = 0;
+    const nowSpy = vi
+      .spyOn(Date, "now")
+      .mockImplementation(() => realNow() + offset);
+    try {
+      const { result } = await syncWith({
+        // 首頁回應沒有存款帳戶：解析階段要切回臺幣存款重讀文字（會呼叫 remainingMs）
+        tapDashboard: { depositInfo: { depAccounts: [] } },
+        depositText: depositPageText,
+        // 明細步驟結束時已 70 秒：超過 55 秒，但仍在 75 秒內
+        onDepositOpened: () => {
+          offset = 70_000;
+        },
+      });
+      expect(result.bankAccounts?.map((a) => a.accountType)).toContain(
+        "savings",
+      );
+      expect(events(warn)).toContainEqual({
+        event: "rakuten_fallback",
+        target: "deposit",
+        step: "text_reread",
+      });
+    } finally {
+      nowSpy.mockRestore();
+      warn.mockRestore();
+      log.mockRestore();
+    }
+  }, 20_000);
+
+  it("does not fail the sync when the transaction response never arrives", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const { result } = await syncWith({ tapDepositCurrent: null });
+    expect(result.bankTransactions).toEqual([]);
+    expect(result.bankBalanceSnapshots?.length).toBe(1);
+    expect(events(warn)).toContainEqual({
+      event: "rakuten_tx_fetch_skipped",
+      reason: "no_response",
+    });
+    warn.mockRestore();
+    log.mockRestore();
+  }, 20_000);
+
+  it("skips unusable transaction payloads with a count-only event and keeps balances", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const { result } = await syncWith({
+      tapDepositCurrent: {
+        display: {},
+        queryAccountNo: DEPOSIT_ACCOUNT_NO,
+        txDetails: "oops",
+      },
+      tapDepositMonths: {},
+    });
+    expect(result.bankTransactions).toEqual([]);
+    expect(result.bankAccounts?.length).toBe(1);
+    expect(events(warn)).toContainEqual({
+      event: "rakuten_tx_skipped",
+      monthsProvided: 1,
+      monthsSkipped: 1,
+      rowsSkipped: 0,
+      reasons: { invalid_payload: 1 },
+    });
+    warn.mockRestore();
+    log.mockRestore();
+  }, 20_000);
+
+  it("logs a count-only event when the bank says the list is truncated and keeps the returned rows", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const { result } = await syncWith({
+      tapDepositCurrent: depositTxnRsData(monthRows("2026/09", 58_888, 9), {
+        dataEnd: false,
+        dataLimit: true,
+      }),
+      tapDepositMonths: {},
+    });
+    expect(result.bankTransactions).toHaveLength(2);
+    expect(events(log)).toContainEqual({
+      event: "rakuten_tx_truncated",
+      monthsTruncated: 1,
+    });
+    warn.mockRestore();
+    log.mockRestore();
+  }, 20_000);
+
+  it("skips the transaction step without failing when the 臺幣存款 link cannot be clicked", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const { result } = await syncWith({
+      onDepositOpened: () => {
+        throw new Error("boom");
+      },
+    });
+    expect(result.bankTransactions).toEqual([]);
+    expect(result.bankAccounts?.length).toBe(1);
+    expect(events(warn)).toContainEqual({
+      event: "rakuten_tx_fetch_skipped",
+      reason: "nav_missing",
+    });
+    warn.mockRestore();
+    log.mockRestore();
+  }, 20_000);
 });
