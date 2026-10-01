@@ -684,6 +684,86 @@ process.exit(0);
   });
 });
 
+test("SYNC_CREATE_PR 會以 origin repository 指定 GH_REPO，避免 upstream remote 干擾", () => {
+  withTemporaryRepository((root) => {
+    const upstream = createUpstream(root, { includeSecondCommit: false });
+    const originBare = path.join(root, "deployment.git");
+    initializeBareRepository(originBare);
+    git(upstream.worktree, "remote", "add", "deployment", originBare);
+    git(upstream.worktree, "push", "deployment", "main");
+
+    const runner = path.join(root, "runner");
+    cloneRepository(originBare, runner);
+    // origin 的 fetch URL 模擬 GitHub；push 仍走本機 bare，讓更新器可以推送。
+    git(
+      runner,
+      "remote",
+      "set-url",
+      "origin",
+      "https://github.com/ExampleOrg/example-repo.git",
+    );
+    git(runner, "remote", "set-url", "--push", "origin", originBare);
+
+    write(upstream.worktree, "app.txt", "version 2\n");
+    upstream.latestCommit = commitAll(upstream.worktree, "upstream v2");
+    git(upstream.worktree, "push", "origin", "main");
+
+    const mockGhScript = path.join(root, "mock-gh.mjs");
+    const callsLog = path.join(root, "gh-calls.json");
+    writeFileSync(
+      mockGhScript,
+      `import { appendFileSync } from "node:fs";
+const args = process.argv.slice(2);
+appendFileSync(
+  ${JSON.stringify(callsLog)},
+  JSON.stringify({ args, ghRepo: process.env.GH_REPO ?? null }) + "\\n",
+);
+if (args[0] === "--version") {
+  console.log("gh version 2.0.0 (mock)");
+  process.exit(0);
+}
+if (args[0] === "pr" && args[1] === "list") {
+  console.log("[]");
+  process.exit(0);
+}
+if (args[0] === "pr" && args[1] === "create") {
+  console.log("https://github.com/ExampleOrg/example-repo/pull/555");
+  process.exit(0);
+}
+process.exit(0);
+`,
+    );
+
+    const result = runUpdater(runner, upstream.bare, {
+      env: { SYNC_CREATE_PR: "true", GH_BIN: mockGhScript },
+    });
+
+    assert.equal(result.status, 0, result.stderr);
+
+    const calls = readFileSync(callsLog, "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    const prCalls = calls.filter((call) => call.args[0] === "pr");
+    assert.ok(prCalls.length > 0);
+    for (const call of prCalls) {
+      assert.equal(call.ghRepo, "ExampleOrg/example-repo");
+    }
+
+    const syncBranch = `sync/upstream-${upstream.latestCommit.slice(0, 10)}`;
+    assert.notEqual(
+      git(
+        runner,
+        "ls-remote",
+        "--heads",
+        originBare,
+        `refs/heads/${syncBranch}`,
+      ),
+      "",
+    );
+  });
+});
+
 test("gh 建立 PR 權限不足時輸出 GitHub Actions 設定指引", () => {
   withTemporaryRepository((root) => {
     const upstream = createUpstream(root);

@@ -85,6 +85,12 @@ function runGh(args, options = {}) {
   return result;
 }
 
+function remoteRepository(remote) {
+  const url = gitText(["remote", "get-url", remote]);
+  const match = url.match(/github\.com[/:]([^/\s]+)\/([^/\s]+?)(?:\.git)?$/);
+  return match ? `${match[1]}/${match[2]}` : undefined;
+}
+
 function isGhAvailable() {
   try {
     const ghBin = process.env.GH_BIN?.trim() || "gh";
@@ -563,6 +569,11 @@ function syncUpstream() {
     "backup-before-first-upstream-sync";
   const upstreamRemote = "upstream";
   const upstreamRef = `${upstreamRemote}/${upstreamBranch}`;
+  // gh 在同時存在 origin 與 upstream remote 時可能解析到上游 repository；
+  // 明確指定 GH_REPO 讓 PR 一律建立在部署 repository。
+  const ghRepository =
+    remoteRepository(originRemote) ?? process.env.GITHUB_REPOSITORY?.trim();
+  const ghEnvironment = ghRepository ? { GH_REPO: ghRepository } : {};
 
   assertCleanWorkingTree();
 
@@ -764,14 +775,10 @@ function syncUpstream() {
   if (isGhAvailable()) {
     let prNumber = "";
     let prUrl = "";
-    const listResult = runGh([
-      "pr",
-      "list",
-      "--head",
-      syncBranch,
-      "--json",
-      "number,url",
-    ]);
+    const listResult = runGh(
+      ["pr", "list", "--head", syncBranch, "--json", "number,url"],
+      { environment: ghEnvironment },
+    );
     try {
       const raw = listResult.stdout.trim();
       const prs = raw ? JSON.parse(raw) : [];
@@ -803,7 +810,7 @@ function syncUpstream() {
       }
       let createResult;
       try {
-        createResult = runGh(createArgs);
+        createResult = runGh(createArgs, { environment: ghEnvironment });
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         if (message.includes("Resource not accessible by integration")) {
