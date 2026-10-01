@@ -442,6 +442,132 @@ test("三方合併發生程式碼衝突時不改 working tree 且不 push", () =
   });
 });
 
+test("SYNC_CREATE_PR 遇程式碼衝突時建立待解衝突 Draft PR 且不動 main", () => {
+  withTemporaryRepository((root) => {
+    const upstream = createUpstream(root, { includeSecondCommit: false });
+    const originBare = path.join(root, "deployment.git");
+    initializeBareRepository(originBare);
+    git(upstream.worktree, "remote", "add", "deployment", originBare);
+    git(upstream.worktree, "push", "deployment", "main");
+
+    const runner = path.join(root, "runner");
+    cloneRepository(originBare, runner);
+    write(runner, "app.txt", "deployment change\n");
+    const deploymentCommit = commitAll(runner, "deployment change");
+    git(runner, "push", "origin", "main");
+
+    write(upstream.worktree, "app.txt", "upstream change\n");
+    upstream.latestCommit = commitAll(upstream.worktree, "upstream change");
+    git(upstream.worktree, "push", "origin", "main");
+
+    const mockGhScript = path.join(root, "mock-gh.mjs");
+    const callsLog = path.join(root, "gh-calls.json");
+    const outputFile = path.join(root, "github-output.txt");
+    writeFileSync(outputFile, "");
+    writeFileSync(
+      mockGhScript,
+      `import { appendFileSync } from "node:fs";
+const args = process.argv.slice(2);
+appendFileSync(${JSON.stringify(callsLog)}, JSON.stringify(args) + "\\n");
+if (args[0] === "--version") {
+  console.log("gh version 2.0.0 (mock)");
+  process.exit(0);
+}
+if (args[0] === "pr" && args[1] === "list") {
+  console.log("[]");
+  process.exit(0);
+}
+if (args[0] === "pr" && args[1] === "create") {
+  console.log("https://github.com/example/repo/pull/321");
+  process.exit(0);
+}
+process.exit(0);
+`,
+    );
+
+    const result = runUpdater(runner, upstream.bare, {
+      env: {
+        SYNC_CREATE_PR: "true",
+        GH_BIN: mockGhScript,
+        GITHUB_OUTPUT: outputFile,
+      },
+    });
+
+    assert.equal(result.status, 0, result.stderr);
+
+    const syncBranch = `sync/upstream-${upstream.latestCommit.slice(0, 10)}`;
+    const newHead = git(runner, "rev-parse", "HEAD");
+
+    assert.equal(remoteBranch(runner, "main"), deploymentCommit);
+    assert.equal(remoteBranch(runner, syncBranch), newHead);
+    assert.match(git(runner, "show", "HEAD:app.txt"), /^<<<<<<< /m);
+    assert.match(git(runner, "show", "HEAD:app.txt"), /^>>>>>>> /m);
+
+    assert.equal(
+      readFileSync(outputFile, "utf8"),
+      "pr_number=321\npr_url=https://github.com/example/repo/pull/321\n",
+    );
+
+    const calls = readFileSync(callsLog, "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    const prCreateCall = calls.find((c) => c[0] === "pr" && c[1] === "create");
+    assert.ok(prCreateCall);
+    assert.ok(prCreateCall.includes("--draft"));
+    const titleIndex = prCreateCall.indexOf("--title") + 1;
+    assert.match(prCreateCall[titleIndex], /\[待解衝突\]/);
+    assert.match(
+      prCreateCall[titleIndex],
+      new RegExp(upstream.latestCommit.slice(0, 10)),
+    );
+    const bodyIndex = prCreateCall.indexOf("--body") + 1;
+    assert.match(prCreateCall[bodyIndex], /app\.txt/);
+    assert.match(prCreateCall[bodyIndex], /git switch/);
+    assert.match(result.stdout, /衝突/);
+  });
+});
+
+test("gh 建立 PR 權限不足時輸出 GitHub Actions 設定指引", () => {
+  withTemporaryRepository((root) => {
+    const upstream = createUpstream(root);
+    const deployment = createImportedDeployment(root, upstream);
+
+    const mockGhScript = path.join(root, "mock-gh.mjs");
+    writeFileSync(
+      mockGhScript,
+      `const args = process.argv.slice(2);
+if (args[0] === "--version") {
+  console.log("gh version 2.0.0 (mock)");
+  process.exit(0);
+}
+if (args[0] === "pr" && args[1] === "list") {
+  console.log("[]");
+  process.exit(0);
+}
+if (args[0] === "pr" && args[1] === "create") {
+  console.error(
+    "pull request create failed: GraphQL: Resource not accessible by integration (createPullRequest)",
+  );
+  process.exit(1);
+}
+process.exit(0);
+`,
+    );
+
+    const result = runUpdater(deployment.worktree, upstream.bare, {
+      env: { SYNC_CREATE_PR: "true", GH_BIN: mockGhScript },
+    });
+
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /Resource not accessible by integration/);
+    assert.match(
+      result.stderr,
+      /Allow GitHub Actions to create and approve pull requests/,
+    );
+  });
+});
+
 test("先前同步後的非衝突使用者修改會保留，且不引入上游 parent", () => {
   withTemporaryRepository((root) => {
     const upstream = createUpstream(root);

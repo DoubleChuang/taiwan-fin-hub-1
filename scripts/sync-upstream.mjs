@@ -305,10 +305,21 @@ function mergeTree(baseline, ours, theirs) {
   return { conflict: result.status === 1, output: result.stdout.trim(), tree };
 }
 
+function conflictedPaths(mergeOutput) {
+  const paths = new Set();
+  for (const line of mergeOutput.split("\n").slice(1)) {
+    const match = /^\d+ [0-9a-f]+ [123]\t(.+)$/.exec(line);
+    if (match) {
+      paths.add(match[1]);
+    }
+  }
+  return [...paths];
+}
+
 function buildMergedTree(baseline, upstreamRef) {
   const directMerge = mergeTree(baseline, "HEAD", upstreamRef);
   if (!directMerge.conflict) {
-    return directMerge.tree;
+    return directMerge;
   }
 
   // workflow 只能由使用者自行更新。若完整 tree 的衝突只來自 workflows，
@@ -321,14 +332,38 @@ function buildMergedTree(baseline, upstreamRef) {
     treeWithWorkflowsFrom(upstreamRef, "HEAD"),
   );
   const codeMerge = mergeTree(maskedBaseline, "HEAD", maskedUpstream);
-  if (codeMerge.conflict) {
-    throw new SyncError(
-      `上游程式碼與部署 repository 發生衝突，已停止同步且不會推送：\n${codeMerge.output}`,
-    );
+  if (!codeMerge.conflict) {
+    console.log("偵測到僅限 GitHub Actions workflows 的差異；保留部署版本。");
   }
+  return codeMerge;
+}
 
-  console.log("偵測到僅限 GitHub Actions workflows 的差異；保留部署版本。");
-  return codeMerge.tree;
+function conflictPrBody({ upstreamCommit, baseline, paths, syncBranch }) {
+  return [
+    "## 上游自動同步 PR（待解衝突）",
+    "",
+    "Git 無法自動合併下列檔案，已保留衝突標記並建立此 Draft PR。請手動解決衝突後再合併。",
+    "",
+    `- 上游 Commit: ${upstreamCommit}`,
+    `- 基準 Commit: ${baseline}`,
+    "",
+    "### 衝突檔案",
+    "",
+    ...paths.map((path) => `- \`${path}\``),
+    "",
+    "### 解決方式",
+    "",
+    "```bash",
+    `git fetch origin ${syncBranch}`,
+    `git switch ${syncBranch}`,
+    "# 編輯衝突檔案，移除 <<<<<<<、=======、>>>>>>> 標記",
+    "git add <檔案>",
+    'git commit -m "解決同步衝突"',
+    "git push",
+    "```",
+    "",
+    "解決後請將此 PR 轉為 Ready for review，再進行安全審查與合併。",
+  ].join("\n");
 }
 
 function restoreInstalledWorkflows(sourceCommit) {
@@ -470,8 +505,31 @@ function syncUpstream() {
     return;
   }
 
-  const mergedTree = buildMergedTree(baseline, upstreamRef);
-  createSyncCommit(mergedTree, upstreamCommit, before);
+  const mergeResult = buildMergedTree(baseline, upstreamRef);
+  const hasConflicts = mergeResult.conflict;
+
+  // 直接推送模式下絕不把衝突標記推入目標分支；PR 模式則保留衝突標記，
+  // 交由使用者開啟 Draft PR 手動解決。
+  if (hasConflicts && process.env.SYNC_CREATE_PR !== "true") {
+    throw new SyncError(
+      `上游程式碼與部署 repository 發生衝突，已停止同步且不會推送：\n${mergeResult.output}`,
+    );
+  }
+
+  const conflictPaths = hasConflicts ? conflictedPaths(mergeResult.output) : [];
+  if (hasConflicts) {
+    console.log(
+      `偵測到 ${conflictPaths.length} 個衝突檔案，將建立待解衝突的 Draft PR：`,
+    );
+    for (const conflictPath of conflictPaths) {
+      console.log(`- ${conflictPath}`);
+    }
+    console.log(
+      "::warning::上游同步發生程式碼衝突，已建立待解衝突的 Draft PR，請手動解決後再合併。",
+    );
+  }
+
+  createSyncCommit(mergeResult.tree, upstreamCommit, before);
 
   if (process.env.SYNC_CREATE_PR === "true") {
     const syncBranch = `sync/upstream-${upstreamCommit.slice(0, 10)}`;
@@ -503,9 +561,18 @@ function syncUpstream() {
       if (prNumber) {
         console.log(`已存在 PR #${prNumber}。`);
       } else {
-        const title = `chore(upstream): 同步上游版本 ${upstreamCommit.slice(0, 10)}`;
-        const body = `## 上游自動同步 PR\n\n- 上游 Commit: ${upstreamCommit}\n- 基準 Commit: ${baseline}\n\n此 PR 由排程同步自動發起，請先進行安全審查後再行合併。`;
-        const createResult = runGh([
+        const title = hasConflicts
+          ? `chore(upstream): [待解衝突] 同步上游版本 ${upstreamCommit.slice(0, 10)}`
+          : `chore(upstream): 同步上游版本 ${upstreamCommit.slice(0, 10)}`;
+        const body = hasConflicts
+          ? conflictPrBody({
+              upstreamCommit,
+              baseline,
+              paths: conflictPaths,
+              syncBranch,
+            })
+          : `## 上游自動同步 PR\n\n- 上游 Commit: ${upstreamCommit}\n- 基準 Commit: ${baseline}\n\n此 PR 由排程同步自動發起，請先進行安全審查後再行合併。`;
+        const createArgs = [
           "pr",
           "create",
           "--base",
@@ -516,7 +583,23 @@ function syncUpstream() {
           title,
           "--body",
           body,
-        ]);
+        ];
+        if (hasConflicts) {
+          createArgs.push("--draft");
+        }
+        let createResult;
+        try {
+          createResult = runGh(createArgs);
+        } catch (error) {
+          const message =
+            error instanceof Error ? error.message : String(error);
+          if (message.includes("Resource not accessible by integration")) {
+            throw new SyncError(
+              `${message}\n請確認 GitHub 倉庫 Settings → Actions → General → Workflow permissions 已勾選「Allow GitHub Actions to create and approve pull requests」。`,
+            );
+          }
+          throw error;
+        }
         const stdout = createResult.stdout.trim();
         const urlMatch = stdout.match(/https?:\/\/[^\s]+/);
         if (urlMatch) {

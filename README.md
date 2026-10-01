@@ -150,7 +150,7 @@ git push
 
 GitHub Actions 會在建立 PR 後自動執行 OpenCode 安全審查工具（`scripts/review-pr-security.mjs`），稽核 PR diff 是否包含未授權的外部網路呼叫、加解密與金鑰完整性異動、工作流程權限變更或硬編碼密鑰，並自動在 PR 發表安全性評估報告留言。使用者可在檢視評估與變更確認無虞後合併 PR，再由 Cloudflare Workers Builds 觸發正式部署。
 
-若你修改過程式碼並與上游發生衝突，workflow 會停止且不會推送；請從 Actions 紀錄查看衝突並手動處理。首次同步、備份 branch 與舊版 workflow 的排查方式請參考[進階部署與更新](docs/005-deployment.md)。
+若你修改過程式碼並與上游發生衝突，更新器會保留衝突標記並建立標題含 `[待解衝突]` 的 Draft PR，內文列出衝突檔案與解決指令；解完衝突推回後再將 PR 轉為 Ready for review 即可，排程不會因此中斷。首次同步、備份 branch 與舊版 workflow 的排查方式請參考[進階部署與更新](docs/005-deployment.md)。
 
 ## 本機開發
 
