@@ -364,6 +364,30 @@ test("postPrComment: 在非 dry-run 且指定 --pr 時呼叫 gh pr comment", asy
   ]);
 });
 
+test("postPrComment: 會帶上 GH_REPO 以避免解析到 upstream remote", () => {
+  const calls = [];
+  const previous = process.env.GITHUB_REPOSITORY;
+  process.env.GITHUB_REPOSITORY = "ExampleOrg/example-repo";
+  try {
+    const mockRunner = (cmd, args, options = {}) => {
+      calls.push({ cmd, args, env: options.env });
+      return { status: 0, stdout: "", stderr: "" };
+    };
+
+    postPrComment("99", "body", { runner: mockRunner });
+
+    const ghCall = calls.find((c) => c.args.includes("comment"));
+    assert.ok(ghCall);
+    assert.equal(ghCall.env.GH_REPO, "ExampleOrg/example-repo");
+  } finally {
+    if (previous === undefined) {
+      delete process.env.GITHUB_REPOSITORY;
+    } else {
+      process.env.GITHUB_REPOSITORY = previous;
+    }
+  }
+});
+
 test("formatAiResponse: 正確處理普通 Chat 回應與 DeepSeek-R1 推理思考過程", () => {
   // 1. 一般 Chat 模型回應
   assert.equal(formatAiResponse({ content: "無安全漏洞" }), "無安全漏洞");

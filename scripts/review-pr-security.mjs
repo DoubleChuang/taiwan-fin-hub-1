@@ -1047,10 +1047,17 @@ export function postPrComment(prNumber, commentBody, options = {}) {
       ? [ghBin, "pr", "comment", String(prNumber), "--body-file", tempFile]
       : ["pr", "comment", String(prNumber), "--body-file", tempFile];
 
+    // gh 在同時存在 origin 與 upstream remote 時可能解析到上游 repository；
+    // 明確指定 GH_REPO 讓留言一律張貼在部署 repository 的 PR。
+    const repository =
+      process.env.GH_REPO || process.env.GITHUB_REPOSITORY || undefined;
+    const baseEnvironment = options.env || process.env;
     const result = runner(cmd, args, {
       cwd: options.cwd || process.cwd(),
       encoding: "utf8",
-      env: options.env || process.env,
+      env: repository
+        ? { ...baseEnvironment, GH_REPO: repository }
+        : baseEnvironment,
     });
 
     if (result.error || result.status !== 0) {
