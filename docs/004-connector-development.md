@@ -1,6 +1,6 @@
 # Connector 開發規範
 
-本文件定義 Taiwan Fin Hub 新增與維護 connector 的共同流程。目標是讓 connector 的識別資訊、設定欄位、同步執行、敏感狀態、前端表單與測試保持同步，避免只完成其中一層便上線。前半段是共通規範與新增流程，各來源的特殊行為集中在文末。
+本文件定義 Taiwan Fin Hub 新增與維護 connector 的共同流程。目標是讓 connector 的識別資訊、設定欄位、同步執行、敏感狀態、前端表單與測試保持同步，避免只完成其中一層便上線。前半段是共通規範與新增流程，各來源的特殊行為集中在文末。各 connector 目前的連線方式、驗證流程與保存狀態總覽請見 [`docs/006-connector-connections.md`](./006-connector-connections.md)。
 
 ## 共同註冊點
 
@@ -20,14 +20,14 @@ Connector 採三層 registry：
 
 新增 connector 前先選擇最接近的連接模式：
 
-| Mode                      | 適用情境                                                 | 現有範例                         |
-| ------------------------- | -------------------------------------------------------- | -------------------------------- |
-| `api_credentials`         | 帳密登入外部 API，可自行更新 token                       | 電子發票、中信、新光             |
-| `api_captcha_session`     | App API 登入含 CAPTCHA，challenge 僅短暫加密保存         | 王道、兆豐銀行                   |
-| `api_device_otp`          | API 登入，首次裝置需要 OTP                               | 集保 e 存摺                      |
-| `browser_per_sync`        | 每次同步都必須以 Browser 登入與擷取                      | 國泰世華                         |
-| `browser_session`         | Browser 只負責登入，後續使用可復用的 HTTP session        | 玉山                             |
-| `browser_captcha_session` | Browser 登入含 CAPTCHA，可由 AI 或人工完成並復用 session | 永豐、台新、華南、第一銀行、凱基 |
+| Mode                      | 適用情境                                                 | 現有範例                               |
+| ------------------------- | -------------------------------------------------------- | -------------------------------------- |
+| `api_credentials`         | 帳密登入外部 API，可自行更新 token                       | 電子發票、中信、新光                   |
+| `api_captcha_session`     | App API 登入含 CAPTCHA，challenge 僅短暫加密保存         | 王道、將來、兆豐銀行                   |
+| `api_device_otp`          | API 登入，首次裝置需要 OTP                               | 集保 e 存摺                            |
+| `browser_per_sync`        | 每次同步都必須以 Browser 登入與擷取                      | 國泰世華                               |
+| `browser_session`         | Browser 只負責登入，後續使用可復用的 HTTP session        | 玉山                                   |
+| `browser_captcha_session` | Browser 登入含 CAPTCHA，可由 AI 或人工完成並復用 session | 永豐、台新、華南、第一銀行、凱基、樂天 |
 
 不要為單一銀行建立新的通用框架。只有登入生命週期真的不同時才新增 mode，並同時補上 catalog 說明及共同測試。
 

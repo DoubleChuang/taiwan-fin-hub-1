@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { appendFileSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -8,6 +8,13 @@ const WORKFLOW_PREFIX = ".github/workflows/";
 const WORKFLOW_PATHSPEC = ".github/workflows";
 const DEFAULT_UPSTREAM_URL = "https://github.com/TedLin1993/all-set-tw.git";
 const UPSTREAM_TRAILER = "Taiwan-Fin-Hub-Upstream";
+const BASELINE_TRAILER = "Taiwan-Fin-Hub-Baseline";
+const UPDATER_IDENTITY = {
+  GIT_AUTHOR_NAME: "taiwan-fin-hub-updater",
+  GIT_AUTHOR_EMAIL: "41898282+github-actions[bot]@users.noreply.github.com",
+  GIT_COMMITTER_NAME: "taiwan-fin-hub-updater",
+  GIT_COMMITTER_EMAIL: "41898282+github-actions[bot]@users.noreply.github.com",
+};
 
 class SyncError extends Error {}
 
@@ -42,6 +49,63 @@ function runGit(args, options = {}) {
 
 function gitText(args, options) {
   return runGit(args, options).stdout.trim();
+}
+
+function runGh(args, options = {}) {
+  const { allowedExitCodes = [0], environment = {} } = options;
+  const ghBin = process.env.GH_BIN?.trim() || "gh";
+  const isNodeScript = ghBin.endsWith(".js") || ghBin.endsWith(".mjs");
+  const command = isNodeScript ? process.execPath : ghBin;
+  const commandArgs = isNodeScript ? [ghBin, ...args] : args;
+
+  const result = spawnSync(command, commandArgs, {
+    cwd: process.cwd(),
+    encoding: "utf8",
+    env: { ...process.env, ...environment },
+    maxBuffer: 64 * 1024 * 1024,
+  });
+
+  if (result.error) {
+    throw new SyncError(
+      `無法執行 gh ${args.join(" ")}：${result.error.message}`,
+    );
+  }
+
+  if (!allowedExitCodes.includes(result.status)) {
+    const stdout = result.stdout?.toString().trim();
+    const stderr = result.stderr?.toString().trim();
+    const details = [stdout, stderr].filter(Boolean).join("\n");
+    throw new SyncError(
+      `gh ${args.join(" ")} 執行失敗（exit ${result.status}）${
+        details ? `：\n${details}` : ""
+      }`,
+    );
+  }
+
+  return result;
+}
+
+function remoteRepository(remote) {
+  const url = gitText(["remote", "get-url", remote]);
+  const match = url.match(/github\.com[/:]([^/\s]+)\/([^/\s]+?)(?:\.git)?$/);
+  return match ? `${match[1]}/${match[2]}` : undefined;
+}
+
+function isGhAvailable() {
+  try {
+    const ghBin = process.env.GH_BIN?.trim() || "gh";
+    const isNodeScript = ghBin.endsWith(".js") || ghBin.endsWith(".mjs");
+    const command = isNodeScript ? process.execPath : ghBin;
+    const commandArgs = isNodeScript ? [ghBin, "--version"] : ["--version"];
+    const result = spawnSync(command, commandArgs, {
+      cwd: process.cwd(),
+      encoding: "utf8",
+      maxBuffer: 1024 * 1024,
+    });
+    return !result.error && result.status === 0;
+  } catch {
+    return false;
+  }
 }
 
 function assertCleanWorkingTree() {
@@ -230,14 +294,114 @@ function treeWithWorkflowsFrom(sourceCommit, workflowSourceCommit) {
 
 function temporaryCommitForTree(tree) {
   return gitText(["commit-tree", tree, "-m", "temporary sync merge tree"], {
-    environment: {
-      GIT_AUTHOR_NAME: "taiwan-fin-hub-updater",
-      GIT_AUTHOR_EMAIL: "41898282+github-actions[bot]@users.noreply.github.com",
-      GIT_COMMITTER_NAME: "taiwan-fin-hub-updater",
-      GIT_COMMITTER_EMAIL:
-        "41898282+github-actions[bot]@users.noreply.github.com",
-    },
+    environment: UPDATER_IDENTITY,
   });
+}
+
+function createTrailerCommit(
+  tree,
+  parent,
+  upstreamCommit,
+  trailers,
+  subject = "同步上游版本",
+) {
+  const args = ["commit-tree", tree];
+  if (parent) {
+    args.push("-p", parent);
+  }
+  args.push("-m", `${subject} ${upstreamCommit.slice(0, 12)}`);
+  args.push(
+    "-m",
+    trailers.map((trailer) => `${trailer}: ${upstreamCommit}`).join("\n"),
+  );
+  return gitText(args, { environment: UPDATER_IDENTITY });
+}
+
+function treeWithConflictedPathsReplaced(mergedTree, paths, replacementCommit) {
+  if (paths.length === 0) {
+    return mergedTree;
+  }
+
+  const temporaryDirectory = mkdtempSync(
+    path.join(tmpdir(), "taiwan-fin-hub-sync-conflicts-"),
+  );
+  const environment = {
+    GIT_INDEX_FILE: path.join(temporaryDirectory, "index"),
+  };
+
+  try {
+    runGit(["read-tree", mergedTree], { environment });
+    for (const conflictedPath of paths) {
+      const entries = parseTreeEntries(replacementCommit, conflictedPath);
+      if (entries.length === 0) {
+        runGit(["update-index", "--force-remove", "--", conflictedPath], {
+          environment,
+        });
+      } else {
+        const entry = entries[0];
+        runGit(
+          [
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            entry.mode,
+            entry.object,
+            conflictedPath,
+          ],
+          { environment },
+        );
+      }
+    }
+    return gitText(["write-tree"], { environment });
+  } finally {
+    rmSync(temporaryDirectory, { recursive: true, force: true });
+  }
+}
+
+function findBaselineCommit(upstreamRef) {
+  const candidates = gitText([
+    "log",
+    "--format=%H",
+    "--grep",
+    `${BASELINE_TRAILER}:`,
+    "HEAD",
+  ])
+    .split("\n")
+    .filter(Boolean);
+
+  for (const candidate of candidates) {
+    const message = gitText(["show", "-s", "--format=%B", candidate]);
+    const matches = [
+      ...message.matchAll(
+        new RegExp(`^${BASELINE_TRAILER}: ([0-9a-f]{40,64})$`, "gm"),
+      ),
+    ];
+    const upstreamCommit = matches.at(-1)?.[1];
+    if (!upstreamCommit) {
+      continue;
+    }
+
+    const objectCheck = runGit(
+      ["cat-file", "-e", `${upstreamCommit}^{commit}`],
+      { allowedExitCodes: [0, 128] },
+    );
+    if (objectCheck.status !== 0) {
+      continue;
+    }
+
+    // 基準 commit 的 tree 必須等於該上游版本的原始 tree；否則代表它是
+    // 被 squash 或合併後的 commit，不能當作三方合併的純上游基準。
+    if (
+      gitText(["rev-parse", `${candidate}^{tree}`]) !==
+      gitText(["rev-parse", `${upstreamCommit}^{tree}`])
+    ) {
+      continue;
+    }
+
+    return { upstreamCommit, baselineCommit: candidate };
+  }
+
+  return undefined;
 }
 
 function mergeTree(baseline, ours, theirs) {
@@ -254,10 +418,21 @@ function mergeTree(baseline, ours, theirs) {
   return { conflict: result.status === 1, output: result.stdout.trim(), tree };
 }
 
+function conflictedPaths(mergeOutput) {
+  const paths = new Set();
+  for (const line of mergeOutput.split("\n").slice(1)) {
+    const match = /^\d+ [0-9a-f]+ [123]\t(.+)$/.exec(line);
+    if (match) {
+      paths.add(match[1]);
+    }
+  }
+  return [...paths];
+}
+
 function buildMergedTree(baseline, upstreamRef) {
   const directMerge = mergeTree(baseline, "HEAD", upstreamRef);
   if (!directMerge.conflict) {
-    return directMerge.tree;
+    return directMerge;
   }
 
   // workflow 只能由使用者自行更新。若完整 tree 的衝突只來自 workflows，
@@ -270,14 +445,66 @@ function buildMergedTree(baseline, upstreamRef) {
     treeWithWorkflowsFrom(upstreamRef, "HEAD"),
   );
   const codeMerge = mergeTree(maskedBaseline, "HEAD", maskedUpstream);
-  if (codeMerge.conflict) {
-    throw new SyncError(
-      `上游程式碼與部署 repository 發生衝突，已停止同步且不會推送：\n${codeMerge.output}`,
+  if (!codeMerge.conflict) {
+    console.log("偵測到僅限 GitHub Actions workflows 的差異；保留部署版本。");
+  }
+  return codeMerge;
+}
+
+function conflictPrBody({ upstreamCommit, baseline, paths, syncBranch }) {
+  return [
+    "## 上游自動同步 PR（待解衝突）",
+    "",
+    "GitHub 偵測到本次同步與本地修改有衝突。此分支只包含乾淨的上游程式碼，",
+    "未寫入任何衝突標記；請直接使用 GitHub 的衝突解決介面或在本機合併。",
+    "",
+    `- 上游 Commit: ${upstreamCommit}`,
+    `- 基準 Commit: ${baseline}`,
+    "",
+    "### 衝突檔案",
+    "",
+    ...paths.map((path) => `- \`${path}\``),
+    "",
+    "### 解決方式（二選一）",
+    "",
+    "1. 在本 PR 頁面點擊「Resolve conflicts」，於線上編輯器選擇要保留的內容並提交。",
+    "2. 在本機執行：",
+    "",
+    "```bash",
+    "git fetch origin",
+    "git switch main",
+    `git merge origin/${syncBranch}`,
+    "# 解決衝突後",
+    "git add <檔案>",
+    "git commit",
+    "git push",
+    "```",
+    "",
+    "解決後請將此 PR 轉為 Ready for review，再進行安全審查與合併。",
+  ].join("\n");
+}
+
+function transitionPrBody({ upstreamCommit, baseline, paths }) {
+  const sections = [
+    "## 上游自動同步 PR（過渡基準）",
+    "",
+    "偵測到舊版同步紀錄，本次同步會建立純上游的基準 commit；",
+    "合併後，未來同步的衝突將可直接使用 GitHub 的衝突解決介面。",
+    "",
+    `- 上游 Commit: ${upstreamCommit}`,
+    `- 基準 Commit: ${baseline}`,
+  ];
+  if (paths.length > 0) {
+    sections.push(
+      "",
+      "### 過渡期衝突處理",
+      "",
+      "下列檔案的本地修改已保留、未套用上游變更；請確認是否需要手動整合：",
+      "",
+      ...paths.map((path) => `- \`${path}\``),
     );
   }
-
-  console.log("偵測到僅限 GitHub Actions workflows 的差異；保留部署版本。");
-  return codeMerge.tree;
+  return sections.join("\n");
 }
 
 function restoreInstalledWorkflows(sourceCommit) {
@@ -342,6 +569,11 @@ function syncUpstream() {
     "backup-before-first-upstream-sync";
   const upstreamRemote = "upstream";
   const upstreamRef = `${upstreamRemote}/${upstreamBranch}`;
+  // gh 在同時存在 origin 與 upstream remote 時可能解析到上游 repository；
+  // 明確指定 GH_REPO 讓 PR 一律建立在部署 repository。
+  const ghRepository =
+    remoteRepository(originRemote) ?? process.env.GITHUB_REPOSITORY?.trim();
+  const ghEnvironment = ghRepository ? { GH_REPO: ghRepository } : {};
 
   assertCleanWorkingTree();
 
@@ -364,14 +596,33 @@ function syncUpstream() {
 
   const before = gitText(["rev-parse", "HEAD"]);
   const upstreamCommit = gitText(["rev-parse", upstreamRef]);
-  let baseline = findRecordedUpstreamCommit(upstreamRef);
+  const recordedBaseline = findBaselineCommit(upstreamRef);
+  const legacyUpstream = recordedBaseline
+    ? undefined
+    : findRecordedUpstreamCommit(upstreamRef);
+  let baseline;
+  let mergeBaseRef;
+  let baselineParent;
   let requiresBaselineRecord = false;
+  let legacyTransition = false;
 
-  if (baseline) {
-    console.log(`使用先前同步紀錄 ${baseline} 作為三方合併基準。`);
+  if (recordedBaseline) {
+    baseline = recordedBaseline.upstreamCommit;
+    mergeBaseRef = recordedBaseline.baselineCommit;
+    baselineParent = recordedBaseline.baselineCommit;
+    console.log(`使用先前同步基準 ${baseline} 作為三方合併基準。`);
+  } else if (legacyUpstream) {
+    baseline = legacyUpstream;
+    mergeBaseRef = legacyUpstream;
+    legacyTransition = true;
+    console.log(
+      `使用先前同步紀錄 ${baseline} 作為三方合併基準（過渡模式將建立上游基準 commit）。`,
+    );
   } else {
     baseline = mergeBase("HEAD", upstreamRef);
     if (baseline) {
+      mergeBaseRef = baseline;
+      baselineParent = baseline;
       console.log(`使用共同 Git 歷史 ${baseline} 作為三方合併基準。`);
     }
   }
@@ -411,6 +662,8 @@ function syncUpstream() {
     console.log(`初始檔案對應上游 commit ${matchingCommit}，安全檢查通過。`);
     ensureBackupBranch(originRemote, backupBranch);
     baseline = matchingCommit;
+    mergeBaseRef = rootCommit;
+    baselineParent = rootCommit;
     requiresBaselineRecord = true;
   }
 
@@ -419,12 +672,177 @@ function syncUpstream() {
     return;
   }
 
-  const mergedTree = buildMergedTree(baseline, upstreamRef);
-  createSyncCommit(mergedTree, upstreamCommit, before);
+  const mergeResult = buildMergedTree(mergeBaseRef, upstreamRef);
+  const hasConflicts = mergeResult.conflict;
+  const conflictPaths = hasConflicts ? conflictedPaths(mergeResult.output) : [];
 
-  console.log(`推送更新至 ${originRemote}/${targetBranch}...`);
-  runGit(["push", originRemote, `HEAD:refs/heads/${targetBranch}`]);
-  console.log("同步完成；Cloudflare Workers Builds 將自動重新部署。");
+  if (process.env.SYNC_CREATE_PR !== "true") {
+    // 直接推送模式：仍以完整三方合併結果推入目標分支；有衝突則安全停止。
+    if (hasConflicts) {
+      throw new SyncError(
+        `上游程式碼與部署 repository 發生衝突，已停止同步且不會推送：\n${mergeResult.output}`,
+      );
+    }
+    createSyncCommit(mergeResult.tree, upstreamCommit, before);
+    console.log(`推送更新至 ${originRemote}/${targetBranch}...`);
+    runGit(["push", originRemote, `HEAD:refs/heads/${targetBranch}`]);
+    console.log("同步完成；Cloudflare Workers Builds 將自動重新部署。");
+    return;
+  }
+
+  const syncBranch = `sync/upstream-${upstreamCommit.slice(0, 10)}`;
+  let syncCommit;
+  let title;
+  let body;
+  let draft = false;
+
+  if (legacyTransition) {
+    // 舊版同步紀錄沒有純上游基準 commit；先建立基準再帶入合併結果。
+    // 衝突路徑保留本地版本，避免過渡期覆蓋既有客製。
+    const upstreamTree = gitText(["rev-parse", `${upstreamRef}^{tree}`]);
+    const baselineRecord = createTrailerCommit(
+      upstreamTree,
+      before,
+      upstreamCommit,
+      [UPSTREAM_TRAILER, BASELINE_TRAILER],
+      "上游同步基準",
+    );
+    const transitionTree = treeWithConflictedPathsReplaced(
+      mergeResult.tree,
+      conflictPaths,
+      "HEAD",
+    );
+    syncCommit = createTrailerCommit(
+      transitionTree,
+      baselineRecord,
+      upstreamCommit,
+      [UPSTREAM_TRAILER, BASELINE_TRAILER],
+      "同步上游版本",
+    );
+    title = `chore(upstream): 同步上游版本 ${upstreamCommit.slice(0, 10)}`;
+    body = transitionPrBody({ upstreamCommit, baseline, paths: conflictPaths });
+    console.log(
+      "已建立過渡基準 commit；合併後即可使用 GitHub 原生衝突解決介面。",
+    );
+  } else {
+    // 同步分支只包含乾淨的上游 tree（保留部署 repo 的 workflows），
+    // 由 GitHub 依基準 commit 進行三方合併並原生顯示衝突。
+    const syncTree = treeWithWorkflowsFrom(upstreamCommit, "HEAD");
+    syncCommit = createTrailerCommit(
+      syncTree,
+      baselineParent,
+      upstreamCommit,
+      [UPSTREAM_TRAILER, BASELINE_TRAILER],
+      "上游同步基準",
+    );
+    const prediction = mergeTree(baselineParent, "HEAD", syncCommit);
+    const githubConflictPaths = prediction.conflict
+      ? conflictedPaths(prediction.output)
+      : [];
+    draft = prediction.conflict;
+    title = prediction.conflict
+      ? `chore(upstream): [待解衝突] 同步上游版本 ${upstreamCommit.slice(0, 10)}`
+      : `chore(upstream): 同步上游版本 ${upstreamCommit.slice(0, 10)}`;
+    body = prediction.conflict
+      ? conflictPrBody({
+          upstreamCommit,
+          baseline,
+          paths: githubConflictPaths,
+          syncBranch,
+        })
+      : `## 上游自動同步 PR\n\n- 上游 Commit: ${upstreamCommit}\n- 基準 Commit: ${baseline}\n\n此 PR 由排程同步自動發起，請先進行安全審查後再行合併。`;
+    if (prediction.conflict) {
+      console.log(
+        `偵測到 ${githubConflictPaths.length} 個衝突檔案，GitHub 將顯示衝突：`,
+      );
+      for (const conflictPath of githubConflictPaths) {
+        console.log(`- ${conflictPath}`);
+      }
+      console.log(
+        "::warning::上游同步發生程式碼衝突，已建立待解衝突的 Draft PR，請使用 GitHub 衝突解決介面。",
+      );
+    }
+  }
+
+  console.log(`推送更新至 ${originRemote}/${syncBranch}...`);
+  runGit([
+    "push",
+    originRemote,
+    `${syncCommit}:refs/heads/${syncBranch}`,
+    "--force",
+  ]);
+
+  if (isGhAvailable()) {
+    let prNumber = "";
+    let prUrl = "";
+    const listResult = runGh(
+      ["pr", "list", "--head", syncBranch, "--json", "number,url"],
+      { environment: ghEnvironment },
+    );
+    try {
+      const raw = listResult.stdout.trim();
+      const prs = raw ? JSON.parse(raw) : [];
+      if (Array.isArray(prs) && prs.length > 0 && prs[0]?.number) {
+        prNumber = String(prs[0].number);
+        prUrl = prs[0].url || "";
+      }
+    } catch {
+      // Fallback in case stdout isn't valid JSON
+    }
+
+    if (prNumber) {
+      console.log(`已存在 PR #${prNumber}。`);
+    } else {
+      const createArgs = [
+        "pr",
+        "create",
+        "--base",
+        targetBranch,
+        "--head",
+        syncBranch,
+        "--title",
+        title,
+        "--body",
+        body,
+      ];
+      if (draft) {
+        createArgs.push("--draft");
+      }
+      let createResult;
+      try {
+        createResult = runGh(createArgs, { environment: ghEnvironment });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (message.includes("Resource not accessible by integration")) {
+          throw new SyncError(
+            `${message}\n請確認 GitHub 倉庫 Settings → Actions → General → Workflow permissions 已勾選「Allow GitHub Actions to create and approve pull requests」。`,
+          );
+        }
+        throw error;
+      }
+      const stdout = createResult.stdout.trim();
+      const urlMatch = stdout.match(/https?:\/\/[^\s]+/);
+      if (urlMatch) {
+        prUrl = urlMatch[0];
+      }
+      const match = stdout.match(/\/pull\/(\d+)/) || stdout.match(/(\d+)/);
+      if (match) {
+        prNumber = match[1];
+      }
+      console.log(`已建立同步 PR${prNumber ? ` #${prNumber}` : ""}。`);
+    }
+
+    if (process.env.GITHUB_OUTPUT) {
+      if (prNumber) {
+        appendFileSync(process.env.GITHUB_OUTPUT, `pr_number=${prNumber}\n`);
+      }
+      if (prUrl) {
+        appendFileSync(process.env.GITHUB_OUTPUT, `pr_url=${prUrl}\n`);
+      }
+    }
+  }
+
+  console.log("同步完成；已建立更新 branch/PR 等待審查。");
 }
 
 try {
