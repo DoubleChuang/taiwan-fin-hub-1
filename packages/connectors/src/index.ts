@@ -199,6 +199,13 @@ export {
   parseRakutenData,
 } from "./rakuten";
 export type { RakutenConfig, RakutenData, RakutenPayloads } from "./rakuten";
+export { parseRakutenDepositTransactions } from "./rakuten-deposit-transactions";
+export type {
+  RakutenDepositAccountRef,
+  RakutenDepositTransactionResult,
+  RakutenTransactionDraft,
+  RakutenTransactionStats,
+} from "./rakuten-deposit-transactions";
 import { rakutenConfigSchema } from "./rakuten";
 
 export {

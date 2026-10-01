@@ -511,7 +511,7 @@ export const connectorCatalog = {
   nextbank: {
     id: "nextbank",
     title: "將來銀行",
-    description: "存款、口袋餘額與交易明細（開發驗證中；投資尚未接入）",
+    description: "存款、口袋餘額與交易明細（投資尚未接入）",
     connectionMode: "api_captcha_session",
     scopes: ["all"],
     capabilities: ["bank_account", "bank_balance_snapshot", "bank_transaction"],
@@ -599,10 +599,10 @@ export const connectorCatalog = {
   rakuten: {
     id: "rakuten",
     title: "樂天國際銀行",
-    description: "臺幣活存帳戶與每日餘額",
+    description: "臺幣活存帳戶、每日餘額與交易明細",
     connectionMode: "browser_captcha_session",
     scopes: ["all"],
-    capabilities: ["bank_account", "bank_balance_snapshot"],
+    capabilities: ["bank_account", "bank_balance_snapshot", "bank_transaction"],
     publicFields: [],
     credentialFields: ["userId", "account", "password"],
     secretStateFields: [

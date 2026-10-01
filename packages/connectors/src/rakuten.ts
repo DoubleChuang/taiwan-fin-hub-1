@@ -1,5 +1,13 @@
-import type { BankAccount, BankBalanceSnapshot } from "@taiwan-fin-hub/core";
+import type {
+  BankAccount,
+  BankBalanceSnapshot,
+  BankTransaction,
+} from "@taiwan-fin-hub/core";
 import { z } from "zod";
+import {
+  parseRakutenDepositTransactions,
+  type RakutenTransactionStats,
+} from "./rakuten-deposit-transactions";
 
 /**
  * 樂天國際銀行網銀瀏覽器工作階段設定。
@@ -32,11 +40,19 @@ export type RakutenPayloads = {
   dashboardPayload?: unknown;
   /** 「臺幣存款」頁面文字，存款 JSON 取不到時的備援。 */
   depositPageText?: string;
+  /**
+   * 臺幣活存明細 API（CTWQU0001/010 當月、CTWQU0001/011 指定月份）的回應，
+   * 每個元素是一個月份的 rsData；沒有就不產生交易。
+   */
+  depositTxnPayloads?: unknown[];
 };
 
 export type RakutenData = {
   bankAccounts: Array<Omit<BankAccount, "id" | "connectorId">>;
   bankBalanceSnapshots: Array<Omit<BankBalanceSnapshot, "id" | "connectorId">>;
+  bankTransactions: Array<Omit<BankTransaction, "id" | "connectorId">>;
+  /** 交易解析的筆數統計（只有數字與原因代碼），供 connector 記錄 log。 */
+  transactionStats: RakutenTransactionStats;
 };
 
 /**
@@ -49,7 +65,12 @@ function snapshotSourceId(base: string, asOfAt: string): string {
 
 type AccountDraft = Omit<BankAccount, "id" | "connectorId">;
 type SnapshotDraft = Omit<BankBalanceSnapshot, "id" | "connectorId">;
-type ParsedAccount = { account: AccountDraft; snapshot: SnapshotDraft };
+type ParsedAccount = {
+  account: AccountDraft;
+  snapshot: SnapshotDraft;
+  /** 存款帳號（只用於比對活存明細屬於哪個帳戶，不寫入交易）。 */
+  depositAccountNo?: string;
+};
 
 /** 存款優先使用 JSON，JSON 沒有解析出資料才改用頁面文字。 */
 export function parseRakutenData(
@@ -66,9 +87,24 @@ export function parseRakutenData(
       ? depositsFromJson
       : depositAccountsFromText(payloads.depositPageText, asOfAt);
 
+  const { transactions, stats } = parseRakutenDepositTransactions(
+    payloads.depositTxnPayloads ?? [],
+    deposits.flatMap((item) =>
+      item.depositAccountNo
+        ? [
+            {
+              sourceId: item.account.sourceId,
+              accountNo: item.depositAccountNo,
+            },
+          ]
+        : [],
+    ),
+  );
   return {
     bankAccounts: deposits.map((item) => item.account),
     bankBalanceSnapshots: deposits.map((item) => item.snapshot),
+    bankTransactions: transactions,
+    transactionStats: stats,
   };
 }
 
@@ -79,6 +115,7 @@ function depositAccountsFromPayload(
   return parseDepositPayload(payload).map(({ accountNo, entry, balance }) => {
     const sourceId = `bank:rakuten:${accountNo}:TWD`;
     return {
+      depositAccountNo: accountNo,
       account: {
         sourceId,
         institutionName: "樂天國際銀行",
@@ -114,6 +151,7 @@ function depositAccountsFromText(
   const sourceId = `bank:rakuten:${deposit.accountNo}:TWD`;
   return [
     {
+      depositAccountNo: deposit.accountNo,
       account: {
         sourceId,
         institutionName: "樂天國際銀行",

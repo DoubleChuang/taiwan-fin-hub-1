@@ -4,7 +4,7 @@ import InstitutionDetails from "./InstitutionDetails.svelte";
 import { calculateAssetSummary } from "../model/summary";
 
 describe("credit card balance availability", () => {
-  it.each([null, undefined, 0, -1200])(
+  it.each([null, undefined, 0, -1200, 137])(
     "distinguishes missing balances from a confirmed balance of %s",
     (balance) => {
       const summary = calculateAssetSummary({
@@ -41,8 +41,14 @@ describe("credit card balance availability", () => {
         expect(screen.queryByText("金額尚未取得")).not.toBeInTheDocument();
         expect(screen.queryByText("資料不完整")).not.toBeInTheDocument();
         expect(
-          screen.getByText(balance === 0 ? "JP¥0" : "−JP¥1,200"),
+          screen.getByText(
+            balance === 0 ? "JP¥0" : balance > 0 ? "JP¥137" : "−JP¥1,200",
+          ),
         ).toBeInTheDocument();
+        if (balance > 0) {
+          expect(screen.getByText("信用卡溢繳餘額")).toBeInTheDocument();
+          expect(screen.getByText("溢繳餘額，無需繳款")).toBeInTheDocument();
+        }
       }
     },
   );
