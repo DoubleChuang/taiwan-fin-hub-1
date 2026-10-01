@@ -13,19 +13,14 @@ jobs:
   probe:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout deployed repository
-        uses: actions/checkout@v4
-        with:
-          ref: main
-          fetch-depth: 0
-      - name: Sync upstream main safely (copy)
-        id: sync
+      - name: Diagnose shell gh
         env:
-          SYNC_CREATE_PR: "true"
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        shell: bash
         run: |
-          set -euo pipefail
-          git config user.name "taiwan-fin-hub-updater"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          node scripts/sync-upstream.mjs
+          echo "shell token length: ${#GITHUB_TOKEN}"
+          gh auth status || true
+      - name: Diagnose node-spawned gh
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          node -e 'const {spawnSync}=require("child_process"); console.log("node token length:", (process.env.GITHUB_TOKEN||"").length); const r=spawnSync("gh",["auth","status"],{encoding:"utf8"}); process.stdout.write(r.stdout||""); process.stderr.write(r.stderr||""); console.log("exit", r.status);'
