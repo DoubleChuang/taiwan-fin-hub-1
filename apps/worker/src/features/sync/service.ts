@@ -2202,6 +2202,7 @@ export async function syncRakuten(
 
   const bankAccounts = result.bankAccounts ?? [];
   const bankBalanceSnapshots = result.bankBalanceSnapshots ?? [];
+  const bankTransactions = result.bankTransactions ?? [];
   const now = new Date().toISOString();
   const records: SyncWriteRecord[] = [
     ...bankAccounts.map((account) =>
@@ -2209,6 +2210,9 @@ export async function syncRakuten(
     ),
     ...bankBalanceSnapshots.map((snapshot) =>
       bankBalanceSnapshotRecord(connectorId, snapshot, now),
+    ),
+    ...bankTransactions.map((transaction) =>
+      bankTransactionRecord(connectorId, transaction, now),
     ),
   ];
 
@@ -2244,7 +2248,10 @@ export async function syncRakuten(
     success: true,
     connectorId,
     scope,
-    records: bankAccounts.length + bankBalanceSnapshots.length,
+    records:
+      bankAccounts.length +
+      bankBalanceSnapshots.length +
+      bankTransactions.length,
     newRecords,
     cursorUpdated: Boolean(
       persistedCursor && persistedCursor !== settings.sync_cursor,

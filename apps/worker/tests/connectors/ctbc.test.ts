@@ -1,5 +1,6 @@
 import {
   createCtbcConnector,
+  CtbcConnectionError,
   CtbcVerificationRequiredError,
   encryptCtbcPin,
   requireCtbcCredentials,
@@ -386,6 +387,140 @@ describe("CTBC mobile API connector", () => {
     warn.mockRestore();
   });
 });
+
+describe("中信無信用卡同步", () => {
+  it.each([
+    { code: "0000", rsData: { cardDataList: [], billData: {} } },
+    {
+      code: "SYNTHETIC_NO_CARD",
+      message: "您尚未持有本行信用卡。",
+      rsData: {},
+    },
+  ])("確認無卡後保留存款並略過後續信用卡請求", async (cards) => {
+    const { fetcher, resources } = ctbcCardScenario(cards);
+    const result = await createCtbcConnector(fetcher).sync({
+      userId: "A123456789",
+      account: "synthetic-user",
+      password: "synthetic-password",
+    });
+    expect(result.bankAccounts).toHaveLength(1);
+    expect(result.bankBalanceSnapshots).toHaveLength(1);
+    expect(result.creditCardBills).toEqual([]);
+    expect(
+      resources.filter((resource) => resource.startsWith("/twrbm-card/")),
+    ).toEqual(["/twrbm-card/qu002/010"]);
+    expect(resources.at(-1)).toBe("/twrbm-general/ot002/010");
+    expect(JSON.parse(result.cursor ?? "{}").syncedAt).toEqual(
+      expect.any(String),
+    );
+  });
+
+  it.each([
+    {
+      code: "0000",
+      rsData: { cardDataList: [{ cardNoSuffixFour: "5566" }], billData: {} },
+    },
+    { code: "0000", rsData: {} },
+  ])("空帳單或缺少卡片清單不會略過信用卡請求", async (cards) => {
+    const { fetcher, resources } = ctbcCardScenario(cards);
+    await createCtbcConnector(fetcher).sync({
+      userId: "A123456789",
+      account: "synthetic-user",
+      password: "synthetic-password",
+    });
+    expect(
+      resources.filter((resource) => resource.startsWith("/twrbm-card/")),
+    ).toHaveLength(5);
+  });
+
+  it.each([
+    { code: "SYNTHETIC_ERROR", message: "信用卡服務維護中", rsData: {} },
+    {
+      code: "SYNTHETIC_ERROR",
+      message: "如您沒有信用卡，可線上申請。",
+      rsData: {},
+    },
+  ])("未知錯誤與申請說明仍回報失敗", async (cards) => {
+    const { fetcher, resources } = ctbcCardScenario(cards);
+    await expect(
+      createCtbcConnector(fetcher).sync({
+        userId: "A123456789",
+        account: "synthetic-user",
+        password: "synthetic-password",
+      }),
+    ).rejects.toBeInstanceOf(CtbcConnectionError);
+    expect(resources.at(-1)).toBe("/twrbm-general/ot002/010");
+  });
+
+  it.each([
+    { code: "0526" },
+    { code: "0000" },
+    { code: "8888" },
+    { code: "9201", sys: "ESB" },
+  ])("需要驗證的回應不會因無卡文案被略過", async (status) => {
+    const { fetcher } = ctbcCardScenario({
+      ...status,
+      message: "您尚未持有本行信用卡。",
+      rsData: { needOTP: true, cardDataList: [], billData: {} },
+    });
+    await expect(
+      createCtbcConnector(fetcher).sync({
+        userId: "A123456789",
+        account: "synthetic-user",
+        password: "synthetic-password",
+      }),
+    ).rejects.toBeInstanceOf(CtbcVerificationRequiredError);
+  });
+});
+
+function ctbcCardScenario(cards: unknown) {
+  let bootstrap = 0;
+  const resources: string[] = [];
+  const fetcher: CtbcFetch = async (_input, init = {}) => {
+    const request = init.body
+      ? (JSON.parse(String(init.body)) as { resource?: string })
+      : {};
+    if (!request.resource)
+      return jsonResponse(
+        [
+          { access_token: "synthetic-token" },
+          { statusCode: "0000" },
+          {
+            success: true,
+            rsData: { seed: "synthetic-seed" },
+            token: "synthetic-token",
+          },
+        ][bootstrap++],
+      );
+    resources.push(request.resource);
+    if (request.resource === "/twrbm-card/qu002/010")
+      return jsonResponse(cards);
+    if (request.resource === "/twrbm-deposit/qu001/010")
+      return jsonResponse({
+        code: "0000",
+        rsData: {
+          twdAcctSummaryResponse: {
+            demDepBalSummaryResponse: {
+              infoList: [
+                {
+                  accountId: "123456789012",
+                  balance: "1000",
+                  availableBalance: "1000",
+                },
+              ],
+            },
+          },
+        },
+      });
+    if (request.resource === "/twrbm-deposit/qu002/010")
+      return jsonResponse({
+        code: "0000",
+        rsData: { accountId: "123456789012" },
+      });
+    return jsonResponse({ code: "0000", rsData: {} });
+  };
+  return { fetcher, resources };
+}
 
 describe("CTBC local development relay", () => {
   it("is disabled outside local development", () => {

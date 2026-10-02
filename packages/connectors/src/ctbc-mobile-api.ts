@@ -2,6 +2,7 @@ import type { SyncResult } from "@taiwan-fin-hub/core";
 import forge from "node-forge";
 import { parseCtbcData, type CtbcConfig, type CtbcPayloads } from "./ctbc";
 import { BANK_SYNC_MONTHS } from "./sync-window";
+import { isNoCreditCardMessage } from "./credit-card-status";
 
 const CTBC_IMP_ORIGIN = "https://eb.ctbcbank.com/IMP";
 const CTBC_APPLICATION = "EBMW_Adapter";
@@ -159,21 +160,27 @@ export function createCtbcConnector(
           CREDIT_CARD_BILLS_RESOURCE,
           {},
         );
+        const noCreditCard = hasNoCtbcCreditCard(creditCards);
         // The summary call refreshes the same session data used by the official
         // App (available credit and billed/unbilled totals). Its raw response is
         // intentionally not persisted until those fields have a stable mapping.
-        await session.resource(CREDIT_CARD_SUMMARY_RESOURCE, {});
-        const unbilled = await fetchUnbilledTransactions(session);
-        const realtime = await fetchPagedCardItems(
-          session,
-          REALTIME_RESOURCE,
-          REALTIME_PAGE_RESOURCE,
-          {},
-        );
+        if (!noCreditCard)
+          await session.resource(CREDIT_CARD_SUMMARY_RESOURCE, {});
+        const unbilled = noCreditCard
+          ? undefined
+          : await fetchUnbilledTransactions(session);
+        const realtime = noCreditCard
+          ? undefined
+          : await fetchPagedCardItems(
+              session,
+              REALTIME_RESOURCE,
+              REALTIME_PAGE_RESOURCE,
+              {},
+            );
         const payloads: CtbcPayloads = {
           depositOverview,
           depositTransactions,
-          creditCards,
+          creditCards: noCreditCard ? undefined : creditCards,
           unbilled,
           realtime,
         };
@@ -445,6 +452,19 @@ class CtbcMobileSession {
     const statusCode = stringValue(response.statusCode);
     const system = stringValue(response.sys || response.systemId);
     if (
+      resource === CREDIT_CARD_BILLS_RESOURCE &&
+      isVerificationResponse(response)
+    ) {
+      throw new CtbcVerificationRequiredError(
+        "中國信託登入需要重新驗證，請先至官方 App 完成驗證。",
+      );
+    }
+    if (
+      resource === CREDIT_CARD_BILLS_RESOURCE &&
+      isNoCreditCardMessage(response.message)
+    )
+      return;
+    if (
       !isLogin &&
       (code === "8888" || (system === "ESB" && code === "9201"))
     ) {
@@ -471,6 +491,18 @@ class CtbcMobileSession {
     }
     throw new CtbcConnectionError("中國信託資料同步暫時無法完成。");
   }
+}
+
+function hasNoCtbcCreditCard(response: JsonRecord) {
+  if (isVerificationResponse(response)) return false;
+  if (isNoCreditCardMessage(response.message)) return true;
+  const data = responseData(response);
+  return (
+    Array.isArray(data.cardDataList) &&
+    data.cardDataList.length === 0 &&
+    isRecord(data.billData) &&
+    Object.keys(data.billData).length === 0
+  );
 }
 
 async function fetchDepositTransactions(

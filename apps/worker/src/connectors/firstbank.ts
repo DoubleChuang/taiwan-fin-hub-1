@@ -9,6 +9,7 @@ import puppeteer, {
 } from "@cloudflare/puppeteer";
 import {
   parseFirstbankData,
+  isNoCreditCardMessage,
   type FirstbankConfig,
   type FirstbankPayloads,
 } from "@taiwan-fin-hub/connectors";
@@ -84,7 +85,9 @@ type CaptchaImage = {
 
 type CardPayloadKey = "cardBill" | "recentPayments" | "cardUnbilled";
 
-type CapturedCardResponses = Partial<Record<CardPayloadKey, unknown>>;
+type CapturedCardResponses = Partial<Record<CardPayloadKey, unknown>> & {
+  noCreditCard?: boolean;
+};
 
 type DepositResponseCapture = {
   html?: string;
@@ -1114,7 +1117,10 @@ async function collectFirstbankPayloads(
   // renderer until it is answered, which stalls every in-flight request and
   // every CDP event for that frame. Keep one accepting listener attached for
   // the whole collection so the query can never wedge behind a dialog.
+  let collectingCards = false;
   const onDialog = (dialog: Dialog) => {
+    if (collectingCards && isNoCreditCardMessage(dialog.message()))
+      captured.noCreditCard = true;
     logFirstbankStage("0101-dialog", {
       detail: describeDialog(dialog),
       elapsedMs: elapsedSinceArmed(transactionResponse),
@@ -1175,15 +1181,19 @@ async function collectFirstbankPayloads(
       transactionResponse,
     );
     const cardFrame = pickCardNavigationFrame(page, depositFrame) ?? queryFrame;
+    collectingCards = true;
     await collectCardPayloads(page, cardFrame, captured);
     await Promise.allSettled(responseTasks);
 
     return {
       depositOverviewHtml,
       transactionHistoryHtml,
-      cardBill: captured.cardBill,
-      cardUnbilled: captured.cardUnbilled,
-      recentPayments: captured.recentPayments,
+      hasCreditCard: captured.noCreditCard ? false : undefined,
+      cardBill: captured.noCreditCard ? undefined : captured.cardBill,
+      cardUnbilled: captured.noCreditCard ? undefined : captured.cardUnbilled,
+      recentPayments: captured.noCreditCard
+        ? undefined
+        : captured.recentPayments,
     } as unknown as FirstbankPayloads;
   } finally {
     if (transactionResponse.pending.size > 0) {
@@ -1223,6 +1233,7 @@ async function collectCardPayloads(
 ) {
   let frame = preferred;
   for (const query of CARD_QUERIES) {
+    if (captured.noCreditCard) break;
     frame = await collectCardPayload(
       page,
       frame,
@@ -1242,7 +1253,8 @@ async function collectCardPayload(
 ) {
   if (Object.prototype.hasOwnProperty.call(captured, key)) return preferred;
   const startedAt = Date.now();
-  let frame = await waitForCardHomeFunctions(page, preferred);
+  let frame = await waitForCardHomeFunctions(page, preferred, captured);
+  if (captured.noCreditCard) return frame;
   logFirstbankStage("card-query-start", {
     path: framePathname(frame),
     detail: key,
@@ -1254,7 +1266,8 @@ async function collectCardPayload(
       detail: dataFunc,
     });
     await delay(FRAME_READ_RETRY_MS);
-    frame = await waitForCardHomeFunctions(page, frame);
+    frame = await waitForCardHomeFunctions(page, frame, captured);
+    if (captured.noCreditCard) return frame;
     opened = await openCardFunction(frame, dataFunc);
   }
   if (opened !== "opened") {
@@ -1375,7 +1388,11 @@ async function waitForCardNavigationFrame(page: Page, preferred: Frame) {
   throw new FirstbankConnectionError("第一銀行信用卡功能頁面尚未載入完成。");
 }
 
-async function waitForCardHomeFunctions(page: Page, preferred: Frame) {
+async function waitForCardHomeFunctions(
+  page: Page,
+  preferred: Frame,
+  captured: CapturedCardResponses,
+) {
   const homePath = urlPathname(HOME_URL);
   let frame = await navigateToCardHome(page, preferred);
   const deadline = Date.now() + ACTION_TIMEOUT_MS;
@@ -1387,6 +1404,10 @@ async function waitForCardHomeFunctions(page: Page, preferred: Frame) {
     );
     for (const candidate of candidates) {
       const availableFunctions = await findCardFunctions(candidate);
+      if (captured.noCreditCard || (await hasNoCreditCardNotice(candidate))) {
+        captured.noCreditCard = true;
+        return candidate;
+      }
       if (
         CARD_QUERIES.every(({ dataFunc }) =>
           availableFunctions.includes(dataFunc),
@@ -1413,6 +1434,22 @@ async function waitForCardHomeFunctions(page: Page, preferred: Frame) {
     detail: missingFunctions || "unknown",
   });
   throw new FirstbankConnectionError("第一銀行信用卡功能入口讀取失敗。");
+}
+
+async function hasNoCreditCardNotice(frame: Frame) {
+  const messages = await withActionTimeout(
+    frame.evaluate(() => [
+      document.body.innerText,
+      ...Array.from(
+        document.querySelectorAll<HTMLElement>(
+          "#alertMsgContent, [role='alert']",
+        ),
+      )
+        .filter((element) => element.getClientRects().length > 0)
+        .map((element) => element.innerText),
+    ]),
+  ).catch(() => undefined);
+  return Array.isArray(messages) && messages.some(isNoCreditCardMessage);
 }
 
 async function findCardFunctions(frame: Frame) {
@@ -1471,7 +1508,10 @@ async function waitForCardResponse(
   key: CardPayloadKey,
 ) {
   const deadline = Date.now() + CARD_RESPONSE_TIMEOUT_MS;
-  while (!Object.prototype.hasOwnProperty.call(captured, key)) {
+  while (
+    !captured.noCreditCard &&
+    !Object.prototype.hasOwnProperty.call(captured, key)
+  ) {
     if (Date.now() >= deadline) {
       throw new FirstbankActionTimeoutError();
     }
@@ -1484,6 +1524,8 @@ async function captureCardResponse(
   key: CardPayloadKey,
   captured: CapturedCardResponses,
 ) {
+  const status = httpStatus(response);
+  if (status !== undefined && (status < 200 || status >= 300)) return;
   try {
     storeCardResponse(captured, key, await response.json());
     return;
@@ -1503,6 +1545,22 @@ function storeCardResponse(
   key: CardPayloadKey,
   payload: unknown,
 ) {
+  if (isRecord(payload)) {
+    const head = isRecord(payload.HEAD) ? payload.HEAD : payload.head;
+    if (isRecord(head)) {
+      const expectedCode = {
+        cardBill: "CMSQRY0014",
+        recentPayments: "CMSQRY0006",
+        cardUnbilled: "CMSQRY0008",
+      }[key];
+      const messageId = String(head.MSGID ?? head.msgid ?? "");
+      if (
+        (!messageId || messageId.includes(expectedCode)) &&
+        isNoCreditCardMessage(head.RETURNDESC ?? head.returndesc)
+      )
+        captured.noCreditCard = true;
+    }
+  }
   const previous = captured[key];
   captured[key] =
     key === "recentPayments" && previous !== undefined

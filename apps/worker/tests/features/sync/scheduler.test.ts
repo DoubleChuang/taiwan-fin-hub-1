@@ -318,6 +318,30 @@ describe("scheduled sync rounds", () => {
     );
   });
 
+  it("信用卡專用銀行的無卡空結果仍完成排程並通知成功", async () => {
+    const job = syncJob("custom", "taishin");
+    mocks.findOpenDefaultScheduleBatchId.mockResolvedValue(null);
+    mocks.findNextDueSyncJob.mockResolvedValue(job);
+    mocks.syncTaishin.mockResolvedValueOnce({
+      connectorId: "taishin",
+      scope: "all",
+      records: 0,
+      newRecords: {
+        invoices: 0,
+        bankTransactions: 0,
+        investmentTransactions: 0,
+      },
+      cursorUpdated: true,
+    });
+    await runSchedulerTick(env(), scheduledController);
+    expect(mocks.completeSyncJob).toHaveBeenCalledOnce();
+    expect(mocks.failSyncJob).not.toHaveBeenCalled();
+    expect(mocks.safelySendSyncNotification).toHaveBeenCalledWith(
+      expect.anything(),
+      { connectorId: "taishin", status: "success" },
+    );
+  });
+
   it("dispatches a Nextbank schedule without reusing a manual CAPTCHA", async () => {
     mocks.findOpenDefaultScheduleBatchId.mockResolvedValue(null);
     mocks.findNextDueSyncJob.mockResolvedValue(syncJob("custom", "nextbank"));

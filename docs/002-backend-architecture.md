@@ -593,6 +593,8 @@ promotion 與 finalize 的進度。暫時錯誤使用 Queue retry，需要互動
 
 Connector 不得直接寫入金融資料表。
 
+銀行確認沒有信用卡時，connector 仍以正常 `SyncResult` 完成同步：支援存款者回傳存款，信用卡專用來源可回傳空結果。空結果仍執行設定／cursor 的 finalize statements，排程記為成功；不刪除既有信用卡歷史，也不建立新的零餘額快照。無卡判斷留在 connector，不能在共用 service 將未知信用卡錯誤改成成功。各行判斷依據見 [Connector 開發規範](004-connector-development.md#無信用卡情境)。
+
 同步 service 應先：
 
 1. 將 connector response 正規化成 core contract。

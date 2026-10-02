@@ -249,6 +249,78 @@ function creditCardBillRecord(
 }
 
 describe("staged sync persistence", () => {
+  it("無卡空結果仍更新 cursor，並保留既有信用卡與餘額歷史", async () => {
+    const db = createDb();
+    const d1 = db as unknown as D1Database;
+    db.database
+      .prepare(
+        "INSERT INTO connector_settings (id, connector_id, encrypted_config, sync_cursor, created_at, updated_at) VALUES ('taishin-settings', 'taishin', 'encrypted', 'old-cursor', '2026-09-01', '2026-09-01')",
+      )
+      .run();
+    const before = "2026-09-01T00:00:00.000Z";
+    const now = "2026-09-30T00:00:00.000Z";
+    const account = {
+      sourceId: "credit:taishin:main",
+      institutionName: "台新銀行",
+      accountName: "台新信用卡",
+      accountType: "credit" as const,
+      currency: "TWD",
+    };
+    await persistStagedSyncWrite(d1, {
+      records: [
+        mapAccount("taishin", account, before),
+        mapBalance(
+          "taishin",
+          {
+            accountId: account.sourceId,
+            sourceId: "old-snapshot",
+            balance: -1000,
+            currency: "TWD",
+            asOfAt: before,
+          },
+          before,
+        ),
+      ],
+    });
+    const history = db.database
+      .prepare("SELECT * FROM bank_balance_snapshots")
+      .all();
+    const newRecords = await persistStagedSyncWrite(d1, {
+      records: [],
+      finalizeStatements: [
+        connectorStateStatement(
+          d1,
+          "taishin",
+          "encrypted",
+          null,
+          "new-cursor",
+          now,
+        ),
+      ],
+    });
+    expect(newRecords).toEqual({
+      invoices: 0,
+      bankTransactions: 0,
+      investmentTransactions: 0,
+    });
+    expect(
+      db.database.prepare("SELECT * FROM bank_balance_snapshots").all(),
+    ).toEqual(history);
+    expect(
+      db.database
+        .prepare(
+          "SELECT COUNT(*) AS count FROM bank_accounts WHERE connector_id = 'taishin'",
+        )
+        .get(),
+    ).toEqual({ count: 1 });
+    expect(
+      db.database
+        .prepare(
+          "SELECT sync_cursor, updated_at FROM connector_settings WHERE connector_id = 'taishin'",
+        )
+        .get(),
+    ).toEqual({ sync_cursor: "new-cursor", updated_at: now });
+  });
   it("does not promote Mega Bank records after credentials change between staging and promotion", async () => {
     const db = createDb();
     const d1 = db as unknown as D1Database;

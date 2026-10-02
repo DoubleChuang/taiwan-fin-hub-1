@@ -22,23 +22,23 @@
 
 ## 支援資料來源
 
-| 資料來源     | 支援內容                                                                                              | 登入與驗證                      |
-| ------------ | ----------------------------------------------------------------------------------------------------- | ------------------------------- |
-| 電子發票載具 | 載具發票與品項明細                                                                                    | App 登入                        |
-| 集保 e 存摺  | 交割帳戶餘額與明細（[支援銀行](https://epassbook.tdcc.com.tw/zh/g1.aspx)）、股票、ETF、基金持倉與交易 | App 登入；首次可能需要 OTP      |
-| 玉山銀行     | 存款帳戶、餘額與交易；信用卡帳單與刷卡交易                                                            | 網銀登入                        |
-| 國泰世華銀行 | 存款帳戶、餘額與交易；信用卡帳單與刷卡交易                                                            | 網銀登入；額外驗證需人工處理    |
-| 永豐行動銀行 | 信用卡總覽、近期帳單與未出帳消費                                                                      | 網銀登入；AI 自動辨識驗證碼     |
-| 台新銀行     | 信用卡額度、帳單、已入帳與即時授權消費                                                                | 網銀登入；AI 自動辨識驗證碼     |
-| 中國信託銀行 | 存款帳戶、餘額與交易；信用卡帳單、已入帳、未出帳與即時消費明細                                        | App 登入                        |
-| 新光銀行     | 臺外幣帳戶、餘額、交易明細與信用卡帳單                                                                | App 登入                        |
-| 華南銀行     | 存款帳戶與餘額；信用卡帳單與刷卡明細                                                                  | 網銀登入；AI 自動辨識驗證碼     |
-| 王道銀行     | 活存、定存、餘額與交易                                                                                | App 登入；AI 自動辨識驗證碼     |
-| 第一銀行     | 存款帳戶、餘額與交易明細；信用卡帳單與刷卡明細                                                        | 網銀登入；AI 自動辨識驗證碼     |
-| 凱基銀行     | 臺幣活存帳戶、餘額與交易明細                                                                          | 網銀登入；AI 自動辨識驗證碼     |
-| 樂天國際銀行 | 臺幣活存帳戶與每日餘額                                                                                | 網銀登入；AI 或人工驗證碼       |
-| 兆豐銀行     | 存款帳戶、餘額與交易；信用卡帳單與消費                                                                | App 帳密登入；AI 自動辨識驗證碼 |
-| 將來銀行     | 主帳戶與活存口袋餘額、交易；定存口袋餘額（僅合成驗證）                                                | Web API 登入；AI 或人工驗證碼   |
+| 資料來源     | 支援內容                                                                                              | 登入與驗證                   |
+| ------------ | ----------------------------------------------------------------------------------------------------- | ---------------------------- |
+| 電子發票載具 | 載具發票與品項明細                                                                                    | App 登入                     |
+| 集保 e 存摺  | 交割帳戶餘額與明細（[支援銀行](https://epassbook.tdcc.com.tw/zh/g1.aspx)）、股票、ETF、基金持倉與交易 | App 登入；首次可能需要 OTP   |
+| 玉山銀行     | 存款帳戶、餘額與交易；信用卡帳單與刷卡交易                                                            | 網銀登入                     |
+| 國泰世華銀行 | 存款帳戶、餘額與交易；信用卡帳單與刷卡交易                                                            | 網銀登入；額外驗證需人工處理 |
+| 永豐行動銀行 | 信用卡總覽、近期帳單與未出帳消費                                                                      | 網銀登入；AI 自動辨識驗證碼  |
+| 台新銀行     | 信用卡額度、帳單、已入帳與即時授權消費                                                                | 網銀登入；AI 自動辨識驗證碼  |
+| 中國信託銀行 | 存款帳戶、餘額與交易；信用卡帳單、已入帳、未出帳與即時消費明細                                        | App 登入                     |
+| 新光銀行     | 臺外幣帳戶、餘額、交易明細與信用卡帳單                                                                | App 登入                     |
+| 華南銀行     | 存款帳戶與餘額；信用卡帳單與刷卡明細                                                                  | 網銀登入；AI 自動辨識驗證碼  |
+| 王道銀行     | 活存、定存、餘額與交易                                                                                | App 登入；AI 自動辨識驗證碼  |
+| 第一銀行     | 存款帳戶、餘額與交易明細；信用卡帳單與刷卡明細                                                        | 網銀登入；AI 自動辨識驗證碼  |
+| 凱基銀行     | 臺幣活存帳戶、餘額與交易明細                                                                          | 網銀登入；AI 自動辨識驗證碼  |
+| 樂天國際銀行 | 臺幣活存帳戶、每日餘額與交易明細                                                                      | 網銀登入；AI 自動辨識驗證碼  |
+| 兆豐銀行     | 存款帳戶、餘額與交易；信用卡帳單與消費                                                                | App 登入；AI 自動辨識驗證碼  |
+| 將來銀行     | 主帳戶與活存口袋餘額、交易；定存口袋餘額                                                              | 網銀登入；AI 自動辨識驗證碼  |
 
 ## 使用限制
 
@@ -59,13 +59,9 @@
 
 [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/TedLin1993/all-set-tw)
 
-Cloudflare Builds 會在 build 階段自動檢查並建立排程同步所需的 Queue；正式部署腳本也會再次檢查。既有安裝更新到使用 Queue 的版本時不需要手動建立資源。
-
 首次使用時，依畫面透過 **Git account → New Github Connection → Install & Authorize** 授權 Cloudflare 存取 GitHub。
 
-部署頁會先預填 Access 相關欄位；首次部署只需將 `CONFIG_ENCRYPTION_KEY` 改成自己產生的隨機金鑰，`TEAM_DOMAIN` 與 `POLICY_AUD` 會在步驟二設定。
-
-<img src="images/deploy-setup.png" alt="Cloudflare 部署設定" width="450">
+Worker Secret 只需填入 **`CONFIG_ENCRYPTION_KEY`**。
 
 `CONFIG_ENCRYPTION_KEY` 是系統加密連接器設定時必須使用的金鑰，可用下列指令產生：
 
@@ -73,53 +69,39 @@ Cloudflare Builds 會在 build 階段自動檢查並建立排程同步所需的 
 openssl rand -hex 32
 ```
 
-使用一鍵部署時只需填入一次，部署後由 Cloudflare 保存；日常使用與後續自動更新不需要重新輸入。沒有另外記下金鑰不會影響現有部署，但若日後要重建 Worker、搬移環境或沿用既有 D1，就必須使用相同金鑰，否則需要重新設定所有連接器。若重視災難復原，建議將它保存在密碼管理器；無論是否另外保存，都不要在既有部署中任意更換或刪除。
+金鑰只需填入一次，Cloudflare 會保存供後續更新使用。建議另外存入密碼管理器，重建或搬移時使用相同金鑰；不要在既有部署中更換或刪除，以免無法解密連接器設定。
 
-填寫完成後點擊 **Deploy**。
+<img src="images/deploy-setup.png" alt="Cloudflare 部署頁的 CONFIG_ENCRYPTION_KEY 欄位" width="700">
 
-### 步驟二：啟用登入保護
+將 **Build command** 設為 `npm run build`、**Deploy command** 設為 `npm run deploy`，資源名稱可保留預填值。在同一頁開啟 **Protect with Cloudflare Access**，設定：
 
-1. 前往 [Cloudflare Dashboard](https://dash.cloudflare.com/) → **Workers & Pages**，選擇剛建立的 `taiwan-fin-hub`
-2. 開啟 **Domains**，將 Worker URL 的存取模式從 **Public** 改為 **Restricted**
-3. 若沒有 **Domains** 頁籤，請至 **Settings → Domains & Routes**，在 `workers.dev` 網址旁啟用 Cloudflare Access
+- **Scope：All traffic**，保護正式與預覽部署
+- **Authentication policy：Cloudflare account**，限定你的 Cloudflare 帳戶成員登入
+- **Session duration**：可保留預設 **24 hours**；想延長可選 **7 days**
 
-<img src="images/deploy-domains-restricted.png" alt="啟用 Cloudflare Access" width="700">
+<img src="images/deploy-access-on-create.png" alt="部署頁開啟 Cloudflare Access，選擇 All traffic 與 Cloudflare account" width="700">
 
-切換後，Cloudflare 會顯示以下資訊：
+確認後點擊 **Deploy**。前往 **Worker → Settings → Builds**，等該次 build 顯示成功後重新整理 Worker 頁面，再開啟網站。登入驗證設定會自動取得，後續更新也會沿用。
 
-- **Audience (aud)**：填入 Worker Secret `POLICY_AUD`
-- **JWKs URL**：取出前面的網域作為 `TEAM_DOMAIN`，例如 `https://yourteam.cloudflareaccess.com`
-
-前往 **Settings → Variables and secrets** 設定這兩個 Secret。
-
-<img src="images/deploy-secrets.png" alt="設定 Cloudflare Access Secrets" width="700">
-
-### 步驟三：確認部署
+### 步驟二：確認部署
 
 1. 開啟 Worker 的 `workers.dev` 網址，確認會先要求 Cloudflare Access 登入
 2. 登入後前往「設定 → 資料來源」設定連接器
 3. 點擊同步以取得最新資料
 
-### 步驟四：調整登入方式與有效期限（選用）
+### 延長登入期限（選用）
 
-Cloudflare Access 可能預設使用 Email OTP，登入狀態通常會在 24 小時後過期。以下設定可改用 Cloudflare 帳號登入，並將登入期限延長至一個月。
+部署頁的 **Session duration** 最多可選 **7 days**。若要延長至一個月，部署完成後前往 **Cloudflare One／Zero Trust → Access controls → Applications**，找到保護此 Worker 的 Application：
 
-#### 使用 Cloudflare 帳號登入
+若頁面顯示 **Finish your account setup**，先點擊 **Choose a plan**，完成 **Zero Trust Free** 方案設定。
 
-1. 前往 **Zero Trust → Integrations → Identity providers**，確認已有 **Cloudflare**；若沒有，點選 **Add new identity provider → Cloudflare**
-2. 啟用 **Restrict to account members** 並儲存，避免非此 Cloudflare 帳號成員登入
-3. 前往 **Zero Trust → Access controls → Applications → taiwan-fin-hub → Authentication**，將登入方式設為 **Cloudflare**
-4. 若只使用此登入方式，可啟用 **Apply instant authentication**，略過登入方式選擇頁
+1. 點擊該 Application 的 **Configure**，開啟 **Application details**。
+2. 點擊頁面上方與 **All、Destinations、Policies** 同一排的 **Details** 按鈕，或直接向下捲到頁面最下方。
+3. 在 **Details** 區塊的 **Name** 欄位旁，將 **Session Duration** 設為 **1 month**，再點擊 **Save**。
 
-新建立的 Zero Trust organization 通常已預設啟用 Cloudflare identity provider，不需要另外新增。
+後續自動部署與更新會沿用這些登入設定。
 
-#### 將登入期限延長至一個月
-
-1. 在 `taiwan-fin-hub` Access Application 中，將 **Session Duration** 設為 **1 month**
-2. 前往 **Zero Trust → Access controls → Access settings**，將 **Global session duration** 設為 **1 month**
-3. 若 Access Policy 另外設定了 Session Duration，也要改為一個月，否則會以較短的期限為準
-
-更多 Queue、Access、自動更新原理與故障排查請參考[進階部署與更新](docs/005-deployment.md)。
+部署與登入故障排查及自動更新原理，請參考[進階部署與更新](docs/005-deployment.md)。
 
 ## 自動更新
 
@@ -132,7 +114,7 @@ Cloudflare 的 Deploy to Cloudflare 流程目前不會將 `.github/workflows` �
 1. 在你的部署 repository 開啟 [`deploy/github/sync-upstream.yml`](deploy/github/sync-upstream.yml)，點擊 **Raw** 並複製完整內容
 2. 回到 repository 首頁，選擇 **Add file → Create new file**
 3. 將檔名設為 `.github/workflows/sync-upstream.yml`，貼上剛才複製的內容並 commit 至 `main`
-4. 前往 **Settings → Actions → General → Workflow permissions**，確認已勾選 **Read and write permissions**，並勾選 **Allow GitHub Actions to create and approve pull requests**
+4. 前往 **Settings → Actions → General → Workflow permissions**，確認已允許 GitHub Actions 讀寫 repository 內容
 
 若已將 repository clone 至本機，也可以執行：
 
@@ -146,11 +128,7 @@ git push
 
 完成一次性設定後，可以前往部署 repository 的 **Actions → Sync Latest Version → Run workflow**，點擊 **Run workflow** 立即更新。workflow 也會在每天台灣時間 **04:15** 自動執行。
 
-為避免上游未經審查的程式碼直接部署至生產環境，自動更新流程不再直接推送至 `main`；當有新版本時，更新器會推送至獨立同步分支並自動建立 GitHub Pull Request（例如 `chore(upstream): 同步上游版本 ...`）。
-
-GitHub Actions 會在建立 PR 後自動執行 OpenCode 安全審查工具（`scripts/review-pr-security.mjs`），稽核 PR diff 是否包含未授權的外部網路呼叫、加解密與金鑰完整性異動、工作流程權限變更或硬編碼密鑰，並自動在 PR 發表安全性評估報告留言。使用者可在檢視評估與變更確認無虞後合併 PR，再由 Cloudflare Workers Builds 觸發正式部署。
-
-若你修改過程式碼並與上游發生衝突，更新器會建立標題含 `[待解衝突]` 的 Draft PR；同步分支只包含乾淨的上游程式碼，不會寫入衝突標記，可直接在 PR 頁面點擊 **Resolve conflicts** 解決（或在本機 `git merge`），排程不會因此中斷。首次同步、備份 branch 與舊版 workflow 的排查方式請參考[進階部署與更新](docs/005-deployment.md)。
+每次執行會取得最新版本、進行安全三方合併，並由 Cloudflare Workers Builds 重新部署。若你修改過程式碼並與上游發生衝突，workflow 會停止且不會推送；請從 Actions 紀錄查看衝突並手動處理。首次同步、備份 branch 與舊版 workflow 的排查方式請參考[進階部署與更新](docs/005-deployment.md)。
 
 ## 本機開發
 
@@ -191,8 +169,7 @@ npm run build
 ## 安全機制
 
 - Cloudflare Access 是一般模式的登入閘道；Worker 會驗證 JWT 的簽章、issuer、audience 與有效期限。
-- 連接器帳密與設定以 `CONFIG_ENCRYPTION_KEY` 衍生的金鑰進行 AES-GCM 加密，D1 只儲存密文。
-- 各項金融記錄（如銀行帳戶、交易明細、信用卡帳單與發票等）之原始回應資料（`raw_payload`）亦採用 AES-GCM 加密儲存；具備透明向後相容機制，能無縫相容讀取舊有未加密記錄。
+- 連接器帳密以 `CONFIG_ENCRYPTION_KEY` 衍生的金鑰進行 AES-GCM 加密，D1 只儲存密文。
 - 目前不支援金鑰輪替；若刪除或更換 Cloudflare 中的金鑰，必須重新設定所有連接器。
 
 ## 免責聲明

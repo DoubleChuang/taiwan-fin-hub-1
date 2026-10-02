@@ -177,6 +177,17 @@ const payloads = {
 
 const result = parseCtbcData(payloads, new Date("2026-07-29T00:00:00.000Z"));
 
+const depositOnly = parseCtbcData({
+  ...payloads,
+  creditCards: { rsData: { cardDataList: [], billData: {} } },
+  unbilled: undefined,
+  realtime: undefined,
+});
+assert.equal(depositOnly.bankAccounts.length, 1);
+assert.equal(depositOnly.bankBalanceSnapshots.length, 1);
+assert.equal(depositOnly.bankTransactions.length, 2);
+assert.deepEqual(depositOnly.creditCardBills, []);
+
 assert.equal(result.bankAccounts.length, 2);
 assert.equal(result.bankBalanceSnapshots.length, 2);
 assert.equal(result.bankTransactions.length, 6);

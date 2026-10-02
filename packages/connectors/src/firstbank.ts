@@ -6,6 +6,7 @@ import type {
 } from "@taiwan-fin-hub/core";
 import forge from "node-forge";
 import { z } from "zod";
+import { isNoCreditCardMessage } from "./credit-card-status";
 
 /** 第一銀行網路銀行瀏覽器工作階段設定；機密欄位由 Worker 加密保存。 */
 export const firstbankConfigSchema = z.object({
@@ -34,6 +35,7 @@ export function parseFirstbankConfig(config: unknown): FirstbankConfig {
 
 /** 第一銀行網路銀行工作階段擷取的資料。 */
 export type FirstbankPayloads = {
+  hasCreditCard?: boolean;
   depositOverviewHtml?: string;
   transactionHistoryHtml?: string;
   cardBill?: unknown;
@@ -187,12 +189,15 @@ export function parseFirstbankData(
         deposits.accounts,
       )
     : [];
-  const cards = parseCreditCards(
-    payloads.cardBill,
-    payloads.cardUnbilled,
-    payloads.recentPayments,
-    asOfAt,
-  );
+  const cards =
+    payloads.hasCreditCard === false
+      ? { bankAccounts: [], snapshots: [], transactions: [], bills: [] }
+      : parseCreditCards(
+          payloads.cardBill,
+          payloads.cardUnbilled,
+          payloads.recentPayments,
+          asOfAt,
+        );
   return {
     bankAccounts: dedupeBySourceId([
       ...deposits.bankAccounts,
@@ -1148,6 +1153,13 @@ function cardEnvelopeRecords(
   }
   const head = recordProperty(parsed, "HEAD", "head");
   const content = recordProperty(parsed, "CONTENT", "content");
+  if (
+    head &&
+    (!propertyString(head, "MSGID", "msgid") ||
+      propertyString(head, "MSGID", "msgid").includes(code)) &&
+    isNoCreditCardMessage(propertyString(head, "RETURNDESC", "returndesc"))
+  )
+    return [];
   if (!head || !content) {
     throw new FirstbankProtocolError(
       `第一銀行信用卡 ${code} 回應缺少 HEAD 或 CONTENT。`,

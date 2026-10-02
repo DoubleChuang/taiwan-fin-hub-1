@@ -2,6 +2,40 @@ import { describe, expect, it } from "vitest";
 import { calculateAssetSummary } from "./summary";
 
 describe("calculateAssetSummary", () => {
+  it("counts credit-card overpayments toward net worth instead of debt", () => {
+    const summary = calculateAssetSummary({
+      bank: {
+        accounts: [
+          {
+            id: "credit",
+            sourceId: "credit",
+            connectorId: "sinopac",
+            accountType: "credit",
+            balance: 137,
+            currency: "TWD",
+          },
+          {
+            id: "debt",
+            sourceId: "debt",
+            connectorId: "esun",
+            accountType: "credit",
+            balance: -1000,
+            currency: "TWD",
+          },
+        ],
+        transactions: [],
+      },
+      investments: [],
+      manualAssets: [],
+      rates: [],
+    });
+    expect(summary.cardDebt).toBe(863);
+    expect(summary.netWorth).toBe(-863);
+    expect(
+      summary.institutionGroups.find((group) => group.cards[0]?.id === "credit")
+        ?.debtTotalTwd,
+    ).toBe(-137);
+  });
   it("converts balances and groups accounts and cards by institution", () => {
     const summary = calculateAssetSummary({
       bank: {

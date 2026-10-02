@@ -16,6 +16,7 @@ import puppeteer, {
   type Page,
 } from "@cloudflare/puppeteer";
 import {
+  BANK_SYNC_MONTHS,
   parseRakutenData,
   type RakutenConfig,
 } from "@taiwan-fin-hub/connectors";
@@ -29,6 +30,9 @@ const HOME_PATH_MARKER = "/ebank/chm/";
 const LOGIN_PAGE_PATH = /^\/ebank\/cgn\//i;
 /** 首頁（含臺幣活存）的交易路徑，實際網址前綴為 /ixtein/adapters/ebank/txns。 */
 const DASHBOARD_TXN_PATH = "/channel-chm/CHMQU0001/010";
+/** 臺幣活存明細：010 是當月，011 是月份下拉選單選定的月份（前綴依實際 API，只比對結尾）。 */
+const DEPOSIT_TXN_CURRENT_PATH = "/CTWQU0001/010";
+const DEPOSIT_TXN_MONTH_PATH = "/CTWQU0001/011";
 
 export const RAKUTEN_CAPTCHA_LENGTH = 4;
 export const RAKUTEN_AUTO_LOGIN_ATTEMPTS = 3;
@@ -43,8 +47,23 @@ const OCR_TIMEOUT_MS = 10_000;
 const MIN_OCR_ATTEMPT_MS = 12_000;
 const STALE_SESSION_RELEASE_TIMEOUT_MS = 3_000;
 const SYNC_DEADLINE_MS = 55_000;
+/**
+ * 活存明細與其後解析階段的期限。手動同步是一般 HTTP 請求、同步鎖 30 分鐘、排程 15
+ * 分鐘，沒有 60 秒硬限制；多出的 20 秒只給活存明細用，登入與首頁存款的時限不變
+ * （仍是 SYNC_DEADLINE_MS）。
+ */
+const DEPOSIT_TXN_DEADLINE_MS = 75_000;
 const DASHBOARD_TAP_WAIT_MS = 5_000;
+const DEPOSIT_TXN_WAIT_MS = 6_000;
+const DEPOSIT_MENU_SETTLE_MS = 300;
+const DEPOSIT_MONTH_DROPDOWN_SETTLE_MS = 300;
+/** 登出（確認視窗＋等待導回登入頁）與收尾需要保留的時間，明細抓取不得侵占。 */
+const SYNC_TAIL_RESERVE_MS = 8_000;
+/** 再開始抓一個月份（開下拉、選月份、等回應）至少需要的剩餘時間。 */
+const MIN_TXN_MONTH_MS = 5_000;
 const TAP_POLL_MS = 200;
+/** 等月份下拉按鈕／選項渲染出來的上限（同時受剩餘時間預算封頂）。 */
+const MONTH_DROPDOWN_FIND_TIMEOUT_MS = 3_000;
 const LOGOUT_CONFIRM_WAIT_MS = 3_000;
 const LOGOUT_SETTLE_MS = 2_500;
 const NAV_TIMEOUT_MS = 20_000;
@@ -59,6 +78,7 @@ export type RakutenSyncStage =
   | "configure_browser_page"
   | "login"
   | "fetch_dashboard"
+  | "fetch_deposit_transactions"
   | "parse_payload";
 
 const RAKUTEN_SYNC_STAGE_LABELS: Record<RakutenSyncStage, string> = {
@@ -67,6 +87,7 @@ const RAKUTEN_SYNC_STAGE_LABELS: Record<RakutenSyncStage, string> = {
   configure_browser_page: "設定瀏覽器頁面",
   login: "登入樂天網銀",
   fetch_dashboard: "取得帳戶存款資訊",
+  fetch_deposit_transactions: "取得臺幣存款明細",
   parse_payload: "解析帳務資料",
 };
 
@@ -258,8 +279,24 @@ export function createRakutenConnector(
         ocrAttempts: 0,
         depositSource: "none",
         depositAccountCount: 0,
+        depositTxnMonthsFetched: 0,
+        depositTxnCount: 0,
+        loginMs: 0,
+        dashboardMs: 0,
+        depositTxnMs: 0,
+        logoutMs: 0,
       };
       let outcome = "success";
+      // 階段計時：切換階段時把前一階段的耗時記進 summary；失敗時由外層 finally 收尾，
+      // 所以中途失敗的階段也有耗時
+      let timedStage: RakutenTimedStage | undefined;
+      let timedStageStartedAt = Date.now();
+      const switchTimedStage = (next?: RakutenTimedStage) => {
+        const now = Date.now();
+        if (timedStage) summary[timedStage] += now - timedStageStartedAt;
+        timedStage = next;
+        timedStageStartedAt = now;
+      };
 
       try {
         if (useManualCaptcha) {
@@ -302,6 +339,7 @@ export function createRakutenConnector(
         let loggedIn = false;
         try {
           stage = "login";
+          switchTimedStage("loginMs");
           if (useManualCaptcha) {
             await fillAngularInput(page, "#captcha", config.captcha!);
             await clickLogin(page);
@@ -331,6 +369,7 @@ export function createRakutenConnector(
 
           // --- 存款：首頁 CHMQU0001 解密後的回應 ---
           stage = "fetch_dashboard";
+          switchTimedStage("dashboardMs");
           const dashboardPayload = await waitForTappedResponse(
             page,
             DASHBOARD_TXN_PATH,
@@ -353,7 +392,17 @@ export function createRakutenConnector(
             depositPageText = await readBodyInnerText(page);
           }
 
+          // --- 臺幣活存明細：存款 → 臺幣存款，當月加下拉選單往前的月份 ---
+          stage = "fetch_deposit_transactions";
+          switchTimedStage("depositTxnMs");
+          const depositTxnPayloads = await fetchDepositTransactionPayloads(
+            page,
+            syncStartedAt,
+          );
+          summary.depositTxnMonthsFetched = depositTxnPayloads.length;
+
           stage = "parse_payload";
+          switchTimedStage();
           // 呼叫底層共用 parser 轉換標準模型；存款優先使用 JSON，取不到才用文字
           const hasDeposit = (parsed: {
             bankAccounts: { accountType?: string }[];
@@ -361,7 +410,11 @@ export function createRakutenConnector(
             parsed.bankAccounts.some(
               (account) => account.accountType === "savings",
             );
-          let data = parseRakutenData({ dashboardPayload, depositPageText });
+          let data = parseRakutenData({
+            dashboardPayload,
+            depositPageText,
+            depositTxnPayloads,
+          });
 
           if (!hasDeposit(data) && !depositPageText) {
             console.warn(
@@ -371,13 +424,17 @@ export function createRakutenConnector(
                 step: "text_reread",
               }),
             );
-            // 首頁資料沒有帶出存款，切到臺幣存款頁再讀文字
+            // 首頁資料沒有帶出存款，切到臺幣存款頁再讀文字（明細抓取後可能已在該頁）
             if (remainingMs(syncStartedAt, stage) > 2000) {
               await clickRakutenNav(page, { exact: "臺幣存款" });
               await delay(Math.min(1500, remainingMs(syncStartedAt, stage)));
             }
             depositPageText = await readBodyInnerText(page);
-            data = parseRakutenData({ dashboardPayload, depositPageText });
+            data = parseRakutenData({
+              dashboardPayload,
+              depositPageText,
+              depositTxnPayloads,
+            });
           }
 
           summary.depositAccountCount = data.bankAccounts.filter(
@@ -417,14 +474,23 @@ export function createRakutenConnector(
             );
           }
 
+          summary.depositTxnCount = data.bankTransactions.length;
+          const { transactionStats, ...syncData } = data;
+          logRakutenTransactionStats(transactionStats);
           return {
             records: [],
-            ...data,
+            ...syncData,
           };
         } finally {
           page.off("response", onGlobalResponse);
+          // 中途失敗時，先把當下階段的耗時收尾
+          switchTimedStage();
           // 不留銀行端 session，避免下一次同步撞上「已在其他裝置登入」
-          if (loggedIn) await logoutRakuten(page);
+          if (loggedIn) {
+            const logoutStartedAt = Date.now();
+            await logoutRakuten(page);
+            summary.logoutMs = Date.now() - logoutStartedAt;
+          }
         }
       } catch (error) {
         const normalized = normalizeRakutenSyncError(error, stage);
@@ -432,7 +498,8 @@ export function createRakutenConnector(
         throw normalized;
       } finally {
         if (browserInstance) await closeRakutenBrowser(browserInstance);
-        // 整次同步一筆摘要（資訊類，不含帳號、餘額等值）
+        // 整次同步一筆摘要（資訊類，不含帳號、餘額等值）。此處已在登出與關閉瀏覽器
+        // 之後，所以 logoutMs 一定已寫入 summary
         console.log(
           JSON.stringify({
             event: "rakuten_sync_summary",
@@ -454,7 +521,18 @@ type RakutenSyncSummary = {
   ocrAttempts: number;
   depositSource: RakutenDataSource;
   depositAccountCount: number;
+  /** 成功讀到活存明細回應的月份數（不論之後是否解析成功） */
+  depositTxnMonthsFetched: number;
+  /** 解析出的活存交易筆數 */
+  depositTxnCount: number;
+  /** 各階段耗時（毫秒）；該階段沒執行到就維持 0 */
+  loginMs: number;
+  dashboardMs: number;
+  depositTxnMs: number;
+  logoutMs: number;
 };
+
+type RakutenTimedStage = "loginMs" | "dashboardMs" | "depositTxnMs";
 
 // ---------------------------------------------------------------------------
 // 讀取網頁自己解密後的 API 回應
@@ -577,6 +655,320 @@ async function waitForTappedResponse(
     const left = deadline - Date.now();
     if (left <= 0) return undefined;
     await delay(Math.min(TAP_POLL_MS, left));
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 臺幣活存明細（CTWQU0001）
+// ---------------------------------------------------------------------------
+/**
+ * 明細抓取可用的剩餘時間：明細專用期限（DEPOSIT_TXN_DEADLINE_MS）扣掉登出與收尾
+ * 要保留的時間；可能為負數。
+ */
+function txnBudgetMs(syncStartedAt: number): number {
+  return (
+    DEPOSIT_TXN_DEADLINE_MS -
+    (Date.now() - syncStartedAt) -
+    SYNC_TAIL_RESERVE_MS
+  );
+}
+
+/** "2026/09" 往前推 n 個月（回傳 "YYYY/MM"）；無法解析就回傳 undefined。 */
+export function shiftRakutenMonthLabel(
+  label: string,
+  monthsBack: number,
+): string | undefined {
+  const match = label.match(/(\d{4})\s*\/\s*(\d{1,2})/);
+  if (!match) return undefined;
+  const index = Number(match[1]) * 12 + (Number(match[2]) - 1) - monthsBack;
+  const year = Math.floor(index / 12);
+  const month = (index % 12) + 1;
+  if (!(year > 0) || month < 1 || month > 12) return undefined;
+  return `${year}/${String(month).padStart(2, "0")}`;
+}
+
+type RakutenMonthSelect =
+  { action: "toggle" } | { action: "choose"; label: string };
+
+type RakutenMonthSelectResult = {
+  /** toggle：下拉按鈕目前顯示的月份（"YYYY/MM"，不含帳務資料）。 */
+  label: string;
+  /** toggle：是否點了下拉按鈕；choose：是否點了目標月份選項。 */
+  clicked: boolean;
+  /** 畫面上長得像「YYYY/MM 活存明細」的元素數（只用於診斷）。 */
+  labelShapedCount: number;
+};
+
+/**
+ * 操作臺幣存款頁的月份下拉選單：toggle 點開按鈕並回報目前月份（"YYYY/MM"），
+ * choose 點選指定月份的選項。只找文字含「YYYY/MM 活存明細」的元素（容忍圖示、
+ * 零寬字元等額外文字），不點彈出視窗裡的東西。
+ *
+ * Angular 在回應到達後才會渲染按鈕／選項，所以找不到時每 TAP_POLL_MS 重試，
+ * 最多等 maxWaitMs（呼叫端會用剩餘時間預算封頂）。
+ */
+async function operateMonthDropdown(
+  page: Page,
+  spec: RakutenMonthSelect,
+  maxWaitMs: number,
+): Promise<RakutenMonthSelectResult> {
+  const deadline = Date.now() + Math.max(0, maxWaitMs);
+  let last: RakutenMonthSelectResult = {
+    label: "",
+    clicked: false,
+    labelShapedCount: 0,
+  };
+  for (;;) {
+    const result = await withActionTimeout(
+      page.evaluate((input: RakutenMonthSelect): RakutenMonthSelectResult => {
+        // rakuten-month-select：測試 mock 依函式原始碼辨識這個 evaluate
+        const normalize = (text: string | null | undefined) =>
+          (text ?? "").replace(/[\s\u200b-\u200d\ufeff]+/g, "");
+        const shape = /(\d{4})\/(\d{2})活存明細/;
+        const menuSelector =
+          ".dropdown-menu, [role='listbox'], [role='menu'], ul";
+        const clickableSelector =
+          "button, a, [role='option'], [role='menuitem'], .combo-item";
+        const monthOf = (element: HTMLElement) => {
+          const texts = [
+            element.innerText || element.textContent,
+            element.getAttribute("aria-label"),
+            element.getAttribute("title"),
+          ];
+          for (const text of texts) {
+            const found = shape.exec(normalize(text));
+            if (found) return `${found[1]}/${found[2]}`;
+          }
+          return undefined;
+        };
+        const candidates = Array.from(
+          document.querySelectorAll<HTMLElement>(
+            "a, button, li, span, div, p, [role='option'], [role='menuitem'], .dropdown-item, .combo-item",
+          ),
+        ).flatMap((element) => {
+          if (element.closest(".modal")) return [];
+          const month = monthOf(element);
+          return month ? [{ element, month }] : [];
+        });
+        // 只留最內層符合的元素，避免外層容器被當成按鈕或選項
+        const innermost = candidates.filter(
+          (candidate) =>
+            !candidates.some(
+              (other) =>
+                other !== candidate &&
+                candidate.element.contains(other.element),
+            ),
+        );
+        const entries: { element: HTMLElement; month: string }[] = [];
+        for (const { element, month } of innermost) {
+          const clickable =
+            element.closest<HTMLElement>(clickableSelector) ??
+            element.querySelector<HTMLElement>("a, button") ??
+            element;
+          if (!entries.some((entry) => entry.element === clickable)) {
+            entries.push({ element: clickable, month });
+          }
+        }
+        const labelShapedCount = entries.length;
+        const outsideMenu = (entry: { element: HTMLElement }) =>
+          !entry.element.closest(menuSelector);
+        const toggle =
+          entries.find(
+            (entry) => entry.element.matches("button") && outsideMenu(entry),
+          ) ?? entries.find(outsideMenu);
+        if (input.action === "toggle") {
+          if (!toggle) return { label: "", clicked: false, labelShapedCount };
+          const expanded =
+            toggle.element.getAttribute("aria-expanded") === "true";
+          if (!expanded) toggle.element.click();
+          return { label: toggle.month, clicked: true, labelShapedCount };
+        }
+        const wanted = /(\d{4})\/(\d{2})/.exec(normalize(input.label));
+        const wantedMonth = wanted ? `${wanted[1]}/${wanted[2]}` : undefined;
+        const others = entries.filter(
+          (entry) => entry !== toggle && entry.month === wantedMonth,
+        );
+        const option =
+          others.find((entry) => entry.element.closest(menuSelector)) ??
+          others[0];
+        if (!option) return { label: "", clicked: false, labelShapedCount };
+        option.element.click();
+        return { label: "", clicked: true, labelShapedCount };
+      }, spec),
+    ).catch(() => undefined);
+    if (result) last = result;
+    if (result?.clicked) return result;
+    const left = deadline - Date.now();
+    if (left <= 0) return last;
+    await delay(Math.min(TAP_POLL_MS, left));
+  }
+}
+
+function logRakutenTxnSkipped(
+  reason: string,
+  extra: Record<string, number> = {},
+) {
+  console.warn(
+    JSON.stringify({ event: "rakuten_tx_fetch_skipped", reason, ...extra }),
+  );
+}
+
+/**
+ * 點選單「存款」→「臺幣存款」讀當月明細（CTWQU0001/010），再用月份下拉選單往前
+ * 選到 BANK_SYNC_MONTHS 個月（每個月 CTWQU0001/011）。
+ *
+ * 明細只是附加資料：任何一步失敗、逾時或時間不足都只記錄事件並回傳已取得的
+ * 月份，絕不讓同步失敗（餘額照常）。回傳的每個元素是一個月份的 rsData。
+ * 目前不分頁：display.dataEnd === false／dataLimit === true 時保留已回傳的資料。
+ */
+async function fetchDepositTransactionPayloads(
+  page: Page,
+  syncStartedAt: number,
+): Promise<unknown[]> {
+  const payloads: unknown[] = [];
+  try {
+    if (txnBudgetMs(syncStartedAt) < MIN_TXN_MONTH_MS) {
+      logRakutenTxnSkipped("out_of_time");
+      return payloads;
+    }
+
+    const { count: beforeOpen } = await readTappedResponse(
+      page,
+      DEPOSIT_TXN_CURRENT_PATH,
+    );
+    // 子選單可能要先展開；找不到「存款」不算失敗（臺幣存款連結可能一直在 DOM 裡）
+    await clickRakutenNav(page, { exact: "存款" });
+    await delay(
+      Math.max(0, Math.min(DEPOSIT_MENU_SETTLE_MS, txnBudgetMs(syncStartedAt))),
+    );
+    const opened = await clickRakutenNav(page, { exact: "臺幣存款" });
+    if (!opened) {
+      logRakutenTxnSkipped("nav_missing");
+      return payloads;
+    }
+    // 已經在臺幣存款頁時 SPA 不會重送 010，改讀先前已攔截到的最新一筆
+    const current =
+      (await waitForTappedResponse(
+        page,
+        DEPOSIT_TXN_CURRENT_PATH,
+        Math.max(0, Math.min(DEPOSIT_TXN_WAIT_MS, txnBudgetMs(syncStartedAt))),
+        beforeOpen,
+      )) ?? (await readTappedResponse(page, DEPOSIT_TXN_CURRENT_PATH)).rsData;
+    if (current === undefined) {
+      logRakutenTxnSkipped("no_response");
+      return payloads;
+    }
+    payloads.push(current);
+
+    const dropdownWaitMs = () =>
+      Math.max(
+        0,
+        Math.min(MONTH_DROPDOWN_FIND_TIMEOUT_MS, txnBudgetMs(syncStartedAt)),
+      );
+    let currentLabel: string | undefined;
+    for (let back = 1; back < BANK_SYNC_MONTHS; back += 1) {
+      if (txnBudgetMs(syncStartedAt) < MIN_TXN_MONTH_MS) {
+        logRakutenTxnSkipped("out_of_time", {
+          monthsFetched: payloads.length,
+          monthsWanted: BANK_SYNC_MONTHS,
+        });
+        break;
+      }
+      const { count: beforeMonth } = await readTappedResponse(
+        page,
+        DEPOSIT_TXN_MONTH_PATH,
+      );
+      const toggled = await operateMonthDropdown(
+        page,
+        { action: "toggle" },
+        dropdownWaitMs(),
+      );
+      if (!toggled.clicked) {
+        logRakutenTxnSkipped("month_dropdown_missing", {
+          labelShapedCount: toggled.labelShapedCount,
+        });
+        break;
+      }
+      // 目標月份依「當月」的下拉按鈕文字往前推（第一次的按鈕顯示的就是當月）
+      currentLabel ??= toggled.label;
+      const target = shiftRakutenMonthLabel(currentLabel, back);
+      if (!target) {
+        logRakutenTxnSkipped("month_label_unreadable");
+        break;
+      }
+      await delay(
+        Math.max(
+          0,
+          Math.min(
+            DEPOSIT_MONTH_DROPDOWN_SETTLE_MS,
+            txnBudgetMs(syncStartedAt),
+          ),
+        ),
+      );
+      const chosen = await operateMonthDropdown(
+        page,
+        { action: "choose", label: `${target} 活存明細` },
+        dropdownWaitMs(),
+      );
+      if (!chosen.clicked) {
+        logRakutenTxnSkipped("month_option_missing", {
+          labelShapedCount: chosen.labelShapedCount,
+        });
+        break;
+      }
+      const monthPayload = await waitForTappedResponse(
+        page,
+        DEPOSIT_TXN_MONTH_PATH,
+        Math.max(0, Math.min(DEPOSIT_TXN_WAIT_MS, txnBudgetMs(syncStartedAt))),
+        beforeMonth,
+      );
+      if (monthPayload === undefined) {
+        logRakutenTxnSkipped("no_response", {
+          monthsFetched: payloads.length,
+        });
+        break;
+      }
+      payloads.push(monthPayload);
+    }
+  } catch (error) {
+    // 只記錄錯誤名稱：訊息可能帶有頁面內容
+    console.warn(
+      JSON.stringify({
+        event: "rakuten_tx_fetch_failed",
+        errorName: error instanceof Error ? error.name : "UnknownError",
+        monthsFetched: payloads.length,
+      }),
+    );
+  }
+  return payloads;
+}
+
+/** 交易解析結果的筆數統計；只有數字與原因代碼，沒有任何交易內容。 */
+function logRakutenTransactionStats(stats: {
+  monthsProvided: number;
+  monthsSkipped: number;
+  rowsSkipped: number;
+  monthsTruncated: number;
+  skipReasons: Record<string, number>;
+}) {
+  if (stats.monthsSkipped > 0 || stats.rowsSkipped > 0) {
+    console.warn(
+      JSON.stringify({
+        event: "rakuten_tx_skipped",
+        monthsProvided: stats.monthsProvided,
+        monthsSkipped: stats.monthsSkipped,
+        rowsSkipped: stats.rowsSkipped,
+        reasons: stats.skipReasons,
+      }),
+    );
+  }
+  if (stats.monthsTruncated > 0) {
+    console.log(
+      JSON.stringify({
+        event: "rakuten_tx_truncated",
+        monthsTruncated: stats.monthsTruncated,
+      }),
+    );
   }
 }
 
@@ -1185,9 +1577,19 @@ async function logRakutenLoginResponse(response: HTTPResponse) {
 // ---------------------------------------------------------------------------
 // 整體同步時間限制
 // ---------------------------------------------------------------------------
+/**
+ * 各階段的整體期限：活存明細與其後的解析階段（明細抓完後才會走到，可能已超過
+ * 55 秒）使用延長後的期限，其餘階段維持 SYNC_DEADLINE_MS。
+ */
+function stageDeadlineMs(stage: RakutenSyncStage): number {
+  return stage === "fetch_deposit_transactions" || stage === "parse_payload"
+    ? DEPOSIT_TXN_DEADLINE_MS
+    : SYNC_DEADLINE_MS;
+}
+
 function remainingMs(syncStartedAt: number, stage: RakutenSyncStage): number {
   const elapsed = Date.now() - syncStartedAt;
-  const remaining = SYNC_DEADLINE_MS - elapsed;
+  const remaining = stageDeadlineMs(stage) - elapsed;
   if (remaining <= 0) {
     throw new RakutenSyncDeadlineError(stage, elapsed);
   }

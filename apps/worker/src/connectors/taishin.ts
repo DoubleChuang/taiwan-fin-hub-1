@@ -8,8 +8,10 @@ import puppeteer, {
 } from "@cloudflare/puppeteer";
 import {
   BANK_SYNC_MONTHS,
+  isNoCreditCardMessage,
   parseTaishinCreditCardData,
   type TaishinConfig,
+  type TaishinCreditCardPayloads,
 } from "@taiwan-fin-hub/connectors";
 import type { SyncResult } from "@taiwan-fin-hub/core";
 
@@ -417,7 +419,21 @@ async function loginWithOcr(
   );
 }
 
+class TaishinNoCreditCardError extends Error {}
+
 async function fetchCreditCardPayloads(
+  page: BrowserPage,
+  setStage: (stage: TaishinSyncStage) => void,
+): Promise<TaishinCreditCardPayloads> {
+  try {
+    return await fetchCardholderPayloads(page, setStage);
+  } catch (error) {
+    if (!(error instanceof TaishinNoCreditCardError)) throw error;
+    return { hasCreditCard: false, summary: undefined, bills: [] };
+  }
+}
+
+async function fetchCardholderPayloads(
   page: BrowserPage,
   setStage: (stage: TaishinSyncStage) => void,
 ) {
@@ -450,6 +466,7 @@ async function fetchCreditCardPayloads(
       {},
       OPTIONAL_API_TIMEOUT_MS,
     ).catch((error) => {
+      if (error instanceof TaishinNoCreditCardError) throw error;
       console.warn(
         `[taishin] current payment overview skipped: ${
           error instanceof Error ? error.message : String(error)
@@ -463,7 +480,12 @@ async function fetchCreditCardPayloads(
     setStage("fetch_historical_bills");
     const historicalBills = (
       await Promise.all(
-        months.slice(1).map((month) => fetchBill(month).catch(() => undefined)),
+        months.slice(1).map((month) =>
+          fetchBill(month).catch((error) => {
+            if (error instanceof TaishinNoCreditCardError) throw error;
+            return undefined;
+          }),
+        ),
       )
     ).filter((bill) => bill !== undefined);
     return {
@@ -657,6 +679,15 @@ async function postJson(
       diagnostic.hasApiError = isRecord(payload) && Boolean(payload.error);
     }
     if (isRecord(payload) && Boolean(payload.error)) {
+      if (
+        [REALTIME_PATH, SUMMARY_PATH, OVERVIEW_PATH, BILL_PATH].includes(
+          path,
+        ) &&
+        isNoCreditCardMessage(
+          isRecord(payload.error) ? payload.error.message : payload.error,
+        )
+      )
+        throw new TaishinNoCreditCardError();
       const endpoint = path.split("/").at(-1) ?? path;
       const detail = summarizeApiError(payload.error);
       throw new TaishinConnectionError(
@@ -665,6 +696,7 @@ async function postJson(
     }
     return payload;
   } catch (error) {
+    if (error instanceof TaishinNoCreditCardError) throw error;
     if (error instanceof TaishinConnectionError) throw error;
     if (diagnostic) diagnostic.validJson = false;
     throw new TaishinConnectionError("台新信用卡 API 回應格式無效。");

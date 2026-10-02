@@ -538,6 +538,28 @@ describe("Cathay additional verification", () => {
 });
 
 describe("Cathay credit cards", () => {
+  it.each(["", "系統維護中，請稍後再試"])(
+    "無法辨識的總覽 %s 不會被當成無卡",
+    async (text) => {
+      vi.useFakeTimers();
+      const page = {
+        evaluate: vi.fn().mockResolvedValue(text),
+        goto: vi.fn().mockResolvedValue(undefined),
+      };
+      try {
+        const pending = scrapeCreditCards(
+          page as unknown as Parameters<typeof scrapeCreditCards>[0],
+        );
+        const expectation =
+          expect(pending).rejects.toThrow("信用卡總覽無法辨識");
+        await vi.advanceTimersByTimeAsync(2_000);
+        await expectation;
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
   it("returns no card data when the overview has no card number", async () => {
     vi.useFakeTimers();
     const page = {

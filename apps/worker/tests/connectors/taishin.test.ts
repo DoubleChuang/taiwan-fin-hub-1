@@ -468,4 +468,31 @@ describe("Taishin credit-card parser", () => {
       }),
     ).toThrow("API 回傳錯誤");
   });
+
+  it("明確無卡時不建立信用卡帳戶或零餘額", () => {
+    expect(
+      parseTaishinCreditCardData({
+        hasCreditCard: false,
+        summary: undefined,
+        bills: [],
+      }),
+    ).toEqual({
+      bankAccounts: [],
+      bankBalanceSnapshots: [],
+      bankTransactions: [],
+      creditCardBills: [],
+    });
+  });
+
+  it("有卡但沒有帳單或消費仍保留信用卡帳戶", () => {
+    const result = parseTaishinCreditCardData({
+      hasCreditCard: true,
+      summary: { value: {}, error: null },
+      bills: [],
+      realtime: { value: { fmtRealTxListMap: [] }, error: null },
+    });
+    expect(result.bankAccounts).toHaveLength(1);
+    expect(result.bankTransactions).toEqual([]);
+    expect(result.creditCardBills).toEqual([]);
+  });
 });

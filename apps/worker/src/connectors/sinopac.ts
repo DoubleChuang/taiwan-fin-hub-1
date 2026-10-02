@@ -14,6 +14,7 @@ import type {
 } from "@taiwan-fin-hub/core";
 import {
   BANK_SYNC_MONTHS,
+  isNoCreditCardMessage,
   type SinopacConfig,
 } from "@taiwan-fin-hub/connectors";
 
@@ -200,10 +201,14 @@ class SinopacAppClient {
 
   async fetchCreditCards(): Promise<SinopacApiPayloads> {
     const summary = await this.fetchSummary();
+    if (summary === undefined)
+      return { summary, bills: [], hasValidCard: false };
     const initialBills = await this.post(
       `${CARD_BILLS_PATH}?TxDate=default&TxType=01`,
       "近期帳單",
     );
+    if (initialBills === undefined)
+      return { summary, bills: [], hasValidCard: false };
     const billMonths = extractAdvertisedBillMonths(initialBills).slice(
       1,
       BANK_SYNC_MONTHS,
@@ -288,6 +293,12 @@ class SinopacAppClient {
       throw new Error(`永豐${label} API 回應不是有效 JSON。`);
     }
     assertSinopacApiSuccess(payload, label);
+    if (
+      flattenRecords(payload).some((record) =>
+        isNoCreditCardMessage(record.Message),
+      )
+    )
+      return undefined;
     return payload;
   }
 
@@ -340,7 +351,7 @@ class SinopacAppClient {
     if (
       path === CARD_LATEST_TX_PATH &&
       isRecord(payload) &&
-      stringValue(payload.ResultMessage) === "您沒有有效卡"
+      isNoCreditCardMessage(payload.ResultMessage)
     ) {
       return undefined;
     }
@@ -788,7 +799,7 @@ function assertSinopacApiSuccess(payload: unknown, label: string) {
       "永豐銀行 session 已失效，請重新完成圖形驗證。",
     );
   }
-  if (message === "查無消費紀錄") return;
+  if (message === "查無消費紀錄" || isNoCreditCardMessage(message)) return;
   if (header !== "SUCCESS")
     throw new Error(`永豐${label} API 失敗：${message}`);
 }
@@ -903,7 +914,7 @@ export function parseSinopacCardData(
   const latestBillMatchesStatement =
     latestTwdBill?.statementAmount != null &&
     statementAmount != null &&
-    Math.abs(latestTwdBill.statementAmount) === Math.abs(statementAmount) &&
+    latestTwdBill.statementAmount === statementAmount &&
     (!latestTwdBill.paymentDueDate ||
       !paymentDueDate ||
       latestTwdBill.paymentDueDate === paymentDueDate) &&
@@ -911,6 +922,7 @@ export function parseSinopacCardData(
       !statementClosingDate ||
       latestTwdBill.statementClosingDate === statementClosingDate);
   const noOutstandingStatement =
+    (statementAmount != null && statementAmount <= 0) ||
     summary.noPaymentNeeded ||
     (latestBillMatchesStatement && latestTwdBill?.isPaid === true);
   const bankBalanceSnapshots: Scraped["bankBalanceSnapshots"] = [];
@@ -924,14 +936,16 @@ export function parseSinopacCardData(
     bankBalanceSnapshots.push({
       accountId,
       sourceId: `${accountId}:${now.toISOString().slice(0, 10)}`,
-      balance: noOutstandingStatement
-        ? 0
-        : statementAmount == null
-          ? 0
-          : -Math.abs(statementAmount),
+      balance:
+        statementAmount != null && statementAmount < 0
+          ? -statementAmount
+          : noOutstandingStatement
+            ? 0
+            : statementAmount == null
+              ? 0
+              : -statementAmount,
       availableBalance: summary.availableCredit,
-      statementBalance:
-        statementAmount == null ? undefined : Math.abs(statementAmount),
+      statementBalance: statementAmount,
       paymentDueDate,
       statementClosingDate,
       noPaymentNeeded: noOutstandingStatement,
@@ -954,7 +968,8 @@ export function parseSinopacCardData(
     const previousIndex = bankBalanceSnapshots.findIndex(
       (item) => item.accountId === accountId,
     );
-    const remaining = Math.max(0, bill.statementAmount - bill.paidAmount);
+    // A negative remaining amount is a credit balance, not malformed debt.
+    const remaining = bill.statementAmount - bill.paidAmount;
     const snapshot = {
       ...(previousIndex >= 0 ? bankBalanceSnapshots[previousIndex] : {}),
       accountId,
@@ -963,7 +978,7 @@ export function parseSinopacCardData(
       statementBalance: bill.statementAmount,
       paymentDueDate: bill.paymentDueDate,
       statementClosingDate: bill.statementClosingDate,
-      noPaymentNeeded: remaining === 0,
+      noPaymentNeeded: remaining <= 0,
       currency: bill.currency,
       asOfAt: now.toISOString(),
       raw: {
@@ -1050,6 +1065,7 @@ function parseSummary(payload: unknown) {
     statementAmount: findLabeledAmount(
       records,
       /本期應繳(?:金額)?|本期帳單(?:金額)?|帳單總額|statement\s*amount/i,
+      true,
     ),
     minimumPayment: findLabeledAmount(
       records,
@@ -1106,7 +1122,6 @@ function parseSinoCardAccounting(payload: unknown) {
     if (
       !closingDate ||
       statementAmount == null ||
-      statementAmount < 0 ||
       (paidAmount != null && paidAmount < 0)
     ) {
       throw new Error("永豐帳務資訊日期或金額格式不完整。");
@@ -1117,7 +1132,12 @@ function parseSinoCardAccounting(payload: unknown) {
       statementAmount,
       minimumPayment: parseAmount(stringValue(row.DUEAMT)),
       paidAmount,
-      isPaid: paidAmount == null ? undefined : paidAmount >= statementAmount,
+      isPaid:
+        statementAmount <= 0
+          ? true
+          : paidAmount == null
+            ? undefined
+            : paidAmount >= statementAmount,
       paymentDueDate: dueDate,
       statementClosingDate: closingDate,
       currency,
@@ -1150,7 +1170,7 @@ function parseBills(payload: unknown, now: Date) {
     out.push({
       sourceId: `sinopac:card:statement:${period}:${currency}`,
       billingPeriod: period,
-      statementAmount: Math.abs(statementAmount),
+      statementAmount,
       minimumPayment: absoluteOrUndefined(
         findRecordAmount(record, /最低應繳|最低繳款|minimum\s*payment/i),
       ),
@@ -1592,10 +1612,14 @@ function findLabeledString(records: JsonRecord[], pattern: RegExp) {
   return undefined;
 }
 
-function findLabeledAmount(records: JsonRecord[], pattern: RegExp) {
+function findLabeledAmount(
+  records: JsonRecord[],
+  pattern: RegExp,
+  preserveSign = false,
+) {
   for (const record of records) {
     const value = findRecordAmount(record, pattern, false);
-    if (value != null) return Math.abs(value);
+    if (value != null) return preserveSign ? value : Math.abs(value);
   }
   return undefined;
 }

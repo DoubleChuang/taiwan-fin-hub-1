@@ -359,6 +359,94 @@ describe("Taishin browser session lifecycle", () => {
     expect(browserInstance.close).toHaveBeenCalledOnce();
   });
 
+  it.each([
+    "您尚未持有本行信用卡。",
+    { code: "SYNTHETIC_NO_CARD", message: "您尚未持有本行信用卡。" },
+  ])("明確無卡時成功同步空結果並停止信用卡請求", async (error) => {
+    const browserPage = page();
+    browserPage.evaluate
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        contentType: "application/json",
+        text: JSON.stringify({
+          RESULT: "SUCCESS",
+          DBSESSIONID: "synthetic-session",
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        contentType: "application/json",
+        text: JSON.stringify({ value: {}, error }),
+      });
+    const browserInstance = browser(browserPage);
+    puppeteerMock.launch.mockResolvedValue(browserInstance);
+    const result = await createTaishinConnector({} as Fetcher).sync({
+      ...credentials,
+      sessionCookies: JSON.stringify([
+        {
+          name: "SESSION",
+          value: "synthetic",
+          domain: "my.taishinbank.com.tw",
+        },
+      ]),
+    });
+    expect(result).toMatchObject({
+      bankAccounts: [],
+      bankBalanceSnapshots: [],
+      bankTransactions: [],
+      creditCardBills: [],
+    });
+    expect(
+      browserPage.evaluate.mock.calls.filter(([, input]) =>
+        input?.path?.includes("/web4/"),
+      ),
+    ).toHaveLength(1);
+    expect(browserInstance.close).toHaveBeenCalledOnce();
+    expect(JSON.parse(result.cursor ?? "{}").syncedAt).toEqual(
+      expect.any(String),
+    );
+  });
+
+  it("未知必需查詢錯誤仍回報失敗", async () => {
+    const browserPage = page();
+    browserPage.evaluate
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        contentType: "application/json",
+        text: JSON.stringify({
+          RESULT: "SUCCESS",
+          DBSESSIONID: "synthetic-session",
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        contentType: "application/json",
+        text: JSON.stringify({
+          value: {},
+          error: { code: "SYNTHETIC_ERROR", message: "信用卡服務維護中" },
+        }),
+      });
+    const browserInstance = browser(browserPage);
+    puppeteerMock.launch.mockResolvedValue(browserInstance);
+    await expect(
+      createTaishinConnector({} as Fetcher).sync({
+        ...credentials,
+        sessionCookies: JSON.stringify([
+          {
+            name: "SESSION",
+            value: "synthetic",
+            domain: "my.taishinbank.com.tw",
+          },
+        ]),
+      }),
+    ).rejects.toBeInstanceOf(TaishinConnectionError);
+    expect(browserInstance.close).toHaveBeenCalledOnce();
+  });
+
   it("re-authenticates once and skips history when no current bill exists", async () => {
     const browserPage = page();
     const response = (value: unknown) => ({
