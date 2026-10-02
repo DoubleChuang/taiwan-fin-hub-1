@@ -36,6 +36,7 @@
   }
 
   function cardPaymentLabel(card: BankAccountRow) {
+    if (card.balance != null && card.balance > 0) return "溢繳餘額，無需繳款";
     const latestBill = institutionBills.find(
       (bill) => bill.accountId === card.id,
     );
@@ -51,7 +52,9 @@
 
   function paymentStatusLabel(bill: CreditCardBillRow) {
     if (bill.isPaid === 1)
-      return bill.statementAmount === 0 ? "無需繳款" : "已繳";
+      return bill.statementAmount != null && bill.statementAmount <= 0
+        ? "無需繳款"
+        : "已繳";
     if (bill.isPaid === 0) return "待繳";
     return "狀態未提供";
   }
@@ -76,7 +79,9 @@
         </p>
       </div>
       <div>
-        <p class="text-caption text-subtle">信用卡負債</p>
+        <p class="text-caption text-subtle">
+          {group.debtTotalTwd < 0 ? "信用卡溢繳餘額" : "信用卡負債"}
+        </p>
         <p class="mt-2 text-lg font-medium tabular-nums text-coral">
           {group.hasUnknownCardBalance
             ? "資料不完整"
@@ -170,7 +175,7 @@
             <p class="text-right text-sm font-medium tabular-nums text-coral">
               {card.balance == null
                 ? "金額尚未取得"
-                : formatCurrency(-Math.abs(card.balance), card.currency)}
+                : formatCurrency(card.balance, card.currency)}
             </p>
           </div>
         {/each}

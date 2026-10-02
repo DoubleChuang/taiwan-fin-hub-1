@@ -1,6 +1,20 @@
 import assert from "node:assert/strict";
 import { parseTaishinCreditCardData } from "../../src/taishin";
 
+assert.deepEqual(
+  parseTaishinCreditCardData({
+    hasCreditCard: false,
+    summary: undefined,
+    bills: [],
+  }),
+  {
+    bankAccounts: [],
+    bankBalanceSnapshots: [],
+    bankTransactions: [],
+    creditCardBills: [],
+  },
+);
+
 const summary = {
   value: {
     "001": {

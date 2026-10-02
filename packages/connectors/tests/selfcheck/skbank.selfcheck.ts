@@ -622,7 +622,10 @@ const setupPaths = [
   "/api/v1/Account/GetAssetsOverview",
 ];
 
-function createFakeFetch(emptyTransactionPaths = new Set<string>()) {
+function createFakeFetch(
+  emptyTransactionPaths = new Set<string>(),
+  hasCreditCard = true,
+) {
   const requests: RecordedRequest[] = [];
   const fetcher = async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = new URL(String(input));
@@ -696,7 +699,7 @@ function createFakeFetch(emptyTransactionPaths = new Set<string>()) {
       assert.equal(request.method, "GET");
       return jsonResponse({
         ReturnCode: "0000",
-        Data: assetsOverviewPayload.Data,
+        Data: { HasValidCreditCard: hasCreditCard },
       });
     }
     if (
@@ -833,6 +836,33 @@ const serializedConnectorResult = JSON.stringify(connectorResult);
 assert.doesNotMatch(
   serializedConnectorResult,
   /7000000000001234|7000000000005678|812345678901|4123456789012345|synthetic-skbank-alias|synthetic-skbank-password|A123456789/,
+);
+
+const noCardFetch = createFakeFetch(new Set(), false);
+const noCardResult = await createSkbankConnector(noCardFetch.fetcher).sync({
+  nationalId,
+  alias,
+  password,
+  deviceId,
+});
+assert.equal(noCardResult.bankAccounts.length, 4);
+assert.equal(noCardResult.bankBalanceSnapshots.length, 4);
+assert.equal(noCardResult.bankTransactions.length, 4);
+assert.deepEqual(noCardResult.creditCardBills, []);
+assert.ok(
+  noCardResult.bankAccounts.every(
+    (account) => account.accountType !== "credit",
+  ),
+);
+assert.equal(
+  noCardFetch.requests.some(({ path }) =>
+    path.startsWith("/api/v1/CreditCard/"),
+  ),
+  false,
+);
+assert.equal(
+  noCardFetch.requests.at(-1)?.path,
+  "/api/v1/Authentication/Logout",
 );
 
 const legacyCursorFetch = createFakeFetch();

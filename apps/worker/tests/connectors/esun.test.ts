@@ -42,25 +42,71 @@ function transaction(
 
 describe("E.SUN bill payment status", () => {
   it.each([
-    [true, true],
-    [false, undefined],
-  ])("maps creditCardFeePaid %s to %s", (overviewPaid, isPaid) => {
-    const snapshot: EsunSnapshot = {
-      hasCreditCard: true,
-      cardOverview: {
-        resultCode: "0000",
-        resultBody: { creditCardFeePaid: overviewPaid },
-      },
-      billSummary: { body: { billInfo: {} } },
-      billPeriod: "202608",
-      realtime: {},
-      creditHistory: [],
-      twDeposits: [],
-      frDeposits: [],
-    };
+    [true, true, 12040],
+    [false, undefined, 27248],
+    [undefined, undefined, 27248],
+  ])(
+    "maps creditCardFeePaid %s to %s and excludes paid debt",
+    (overviewPaid, isPaid, outstanding) => {
+      const snapshot: EsunSnapshot = {
+        hasCreditCard: true,
+        cardOverview: {
+          resultCode: "0000",
+          resultBody: {
+            creditCardFeePaid: overviewPaid,
+            currentStatement: [{ currency: "TWD", totalAmountDue: "15,208" }],
+            nextStatement: [{ currency: "TWD", unpostedAmount: "12,040" }],
+          },
+        },
+        billSummary: { body: { billInfo: {} } },
+        billPeriod: "202608",
+        realtime: {},
+        creditHistory: [],
+        twDeposits: [],
+        frDeposits: [],
+      };
 
-    expect(readEsunCardBalances(snapshot).isPaid).toBe(isPaid);
-  });
+      expect(readEsunCardBalances(snapshot)).toMatchObject({
+        statementBalance: 15208,
+        outstanding,
+        isPaid,
+      });
+    },
+  );
+
+  it.each([
+    [15208, 0],
+    [0, 0],
+    [-137, -137],
+  ])(
+    "preserves credits when a paid statement of %s has no new purchases",
+    (statementBalance, outstanding) => {
+      const snapshot: EsunSnapshot = {
+        hasCreditCard: true,
+        cardOverview: {
+          resultCode: "0000",
+          resultBody: {
+            creditCardFeePaid: true,
+            currentStatement: [
+              { currency: "TWD", totalAmountDue: statementBalance },
+            ],
+          },
+        },
+        billSummary: { body: { billInfo: {} } },
+        billPeriod: "202608",
+        realtime: {},
+        creditHistory: [],
+        twDeposits: [],
+        frDeposits: [],
+      };
+
+      expect(readEsunCardBalances(snapshot)).toMatchObject({
+        statementBalance,
+        outstanding,
+        isPaid: true,
+      });
+    },
+  );
 });
 
 describe("E.SUN credit card timeline normalization", () => {

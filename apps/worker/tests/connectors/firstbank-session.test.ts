@@ -341,10 +341,10 @@ function makePage(options?: {
     waitForFunction: vi.fn().mockResolvedValue(undefined),
     waitForNavigation: vi.fn().mockResolvedValue(undefined),
     waitForSelector: vi.fn().mockResolvedValue(undefined),
-    emitResponse(url: string, payload: unknown) {
+    emitResponse(url: string, payload: unknown, status = 200) {
       const response = {
         url: () => url,
-        status: () => 200,
+        status: () => status,
         json: vi.fn().mockResolvedValue(payload),
         text: vi
           .fn()
@@ -1220,6 +1220,123 @@ describe("第一銀行 browser session lifecycle", () => {
 });
 
 describe("第一銀行信用卡 Browser Run 擷取", () => {
+  it.each(["notice", "dialog", "response"])(
+    "明確無卡提示 %s 保留存款並停止後續信用卡查詢",
+    async (signal) => {
+      vi.useFakeTimers();
+      const page = makePage({ authenticated: true });
+      const cardFrame = makeEmptyLiveFrame();
+      detachQueryFrameAfterSearch(page, [cardFrame], transactionTables);
+      if (signal === "notice") {
+        const previousEvaluate = cardFrame.evaluate;
+        cardFrame.evaluate = vi
+          .fn()
+          .mockImplementation(async (fn: unknown, arg?: unknown) => {
+            const source = String(fn);
+            if (source.includes("#alertMsgContent"))
+              return ["您尚未持有本行信用卡。"];
+            if (isCardFunctionProbe(source)) return [];
+            return previousEvaluate(fn, arg);
+          });
+      } else {
+        cardFrame.click = vi
+          .fn()
+          .mockImplementation(async (selector: string) => {
+            if (!selector.includes("F1632"))
+              throw new Error("無卡後不得查詢其他信用卡功能");
+            if (signal === "dialog")
+              page.emitDialog("9998:您尚未持有本行信用卡。", "alert");
+            else
+              page.emitResponse(CARD_BILL_URL, {
+                HEAD: {
+                  MSGID: "CMSQRY0014",
+                  RETURNCODE: "SYNTHETIC_NO_CARD",
+                  RETURNDESC: "您尚未持有本行信用卡。",
+                },
+              });
+          });
+      }
+      const browser = makeBrowser(page);
+      puppeteerMock.launch.mockResolvedValue(browser);
+      try {
+        const pending = createFirstbankConnector({} as Fetcher).sync({
+          ...credentials,
+          sessionCookies: JSON.stringify([
+            {
+              name: "SESSION",
+              value: "synthetic",
+              domain: "ibank.firstbank.com.tw",
+            },
+          ]),
+        });
+        const expectation = expect(pending).resolves.toMatchObject({
+          creditCardBills: [],
+        });
+        await vi.advanceTimersByTimeAsync(12_000);
+        await expectation;
+        const result = await pending;
+        expect(result.bankAccounts).toHaveLength(1);
+        expect(result.bankBalanceSnapshots).toHaveLength(1);
+        expect(result.bankTransactions).toHaveLength(1);
+        expect(
+          result.bankAccounts?.some(
+            (account) => account.accountType === "credit",
+          ),
+        ).toBe(false);
+        expect(
+          cardFrame.click.mock.calls.filter(([selector]) =>
+            String(selector).includes("data-func"),
+          ),
+        ).toHaveLength(signal === "notice" ? 0 : 1);
+        expect(browser.close).toHaveBeenCalledOnce();
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it.each([
+    { label: "HTTP 失敗", status: 503, messageId: "CMSQRY0014" },
+    { label: "回應代碼不符", status: 200, messageId: "CMSQRY0008" },
+  ])("$label 不會因無卡文案被當成成功", async ({ status, messageId }) => {
+    vi.useFakeTimers();
+    const page = makePage({ authenticated: true });
+    const cardFrame = makeEmptyLiveFrame();
+    detachQueryFrameAfterSearch(page, [cardFrame], transactionTables);
+    cardFrame.click = vi.fn().mockImplementation(async () => {
+      page.emitResponse(
+        CARD_BILL_URL,
+        {
+          HEAD: {
+            MSGID: messageId,
+            RETURNCODE: "SYNTHETIC_NO_CARD",
+            RETURNDESC: "您尚未持有本行信用卡。",
+          },
+        },
+        status,
+      );
+    });
+    puppeteerMock.launch.mockResolvedValue(makeBrowser(page));
+    try {
+      const pending = createFirstbankConnector({} as Fetcher).sync({
+        ...credentials,
+        sessionCookies: JSON.stringify([
+          {
+            name: "SESSION",
+            value: "synthetic",
+            domain: "ibank.firstbank.com.tw",
+          },
+        ]),
+      });
+      const expectation =
+        expect(pending).rejects.toThrow("第一銀行信用卡資料讀取失敗。");
+      await vi.advanceTimersByTimeAsync(40_000);
+      await expectation;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("總覽頁找不到 Recorder 的三個信用卡入口時不再誤報同步成功", async () => {
     vi.useFakeTimers();
     const logs: string[] = [];

@@ -83,6 +83,8 @@ export { sinopacConfigSchema, parseSinopacConfig } from "./sinopac";
 export type { SinopacConfig } from "./sinopac";
 import { sinopacConfigSchema } from "./sinopac";
 
+export { isNoCreditCardMessage } from "./credit-card-status";
+
 export {
   parseTaishinConfig,
   parseTaishinCreditCardData,
@@ -199,6 +201,13 @@ export {
   parseRakutenData,
 } from "./rakuten";
 export type { RakutenConfig, RakutenData, RakutenPayloads } from "./rakuten";
+export { parseRakutenDepositTransactions } from "./rakuten-deposit-transactions";
+export type {
+  RakutenDepositAccountRef,
+  RakutenDepositTransactionResult,
+  RakutenTransactionDraft,
+  RakutenTransactionStats,
+} from "./rakuten-deposit-transactions";
 import { rakutenConfigSchema } from "./rakuten";
 
 export {

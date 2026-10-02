@@ -13,6 +13,7 @@ import type {
 } from "@taiwan-fin-hub/core";
 import {
   BANK_SYNC_MONTHS,
+  isNoCreditCardMessage,
   type CathaybkConfig,
 } from "@taiwan-fin-hub/connectors";
 
@@ -1415,9 +1416,8 @@ export async function scrapeCreditCards(page: Page): Promise<Scraped> {
   console.log("[cathaybk] credit card overview opened");
   await new Promise((r) => setTimeout(r, 2000));
 
-  const cardOverview = parseCathayCardOverview(
-    await page.evaluate(() => document.body.innerText),
-  );
+  const overviewText = await page.evaluate(() => document.body.innerText);
+  const cardOverview = parseCathayCardOverview(overviewText);
 
   console.log(
     JSON.stringify({
@@ -1429,6 +1429,14 @@ export async function scrapeCreditCards(page: Page): Promise<Scraped> {
   );
 
   if (!cardOverview.cardDetected) {
+    if (
+      !isNoCreditCardMessage(overviewText) &&
+      !(
+        /信用卡(?:帳戶)?總覽/.test(overviewText) &&
+        /立即(?:線上)?辦卡/.test(overviewText)
+      )
+    )
+      throw new Error("國泰世華信用卡總覽無法辨識，未更新資料。");
     console.log(
       "[cathaybk] no credit card detected; skipping card account and bills",
     );

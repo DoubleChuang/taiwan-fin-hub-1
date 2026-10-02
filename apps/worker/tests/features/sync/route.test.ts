@@ -598,6 +598,31 @@ describe("Cathay sync routes", () => {
 });
 
 describe("Taishin sync routes", () => {
+  it("無卡的空結果以成功回應完成手動同步", async () => {
+    mocks.syncTaishin.mockResolvedValueOnce({
+      success: true,
+      connectorId: "taishin",
+      scope: "all",
+      records: 0,
+      newRecords: {
+        invoices: 0,
+        bankTransactions: 0,
+        investmentTransactions: 0,
+      },
+      cursorUpdated: true,
+    });
+    const response = await syncRoutes.request(
+      "/connectors/taishin/sync",
+      { method: "POST" },
+      env,
+    );
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      success: true,
+      records: 0,
+      cursorUpdated: true,
+    });
+  });
   it("accepts an empty sync body and dispatches the manual sync", async () => {
     const response = await syncRoutes.request(
       "/connectors/taishin/sync",

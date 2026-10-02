@@ -60,6 +60,32 @@ function mainFrame(html = depositHtml) {
   };
 }
 
+describe("華南無信用卡同步", () => {
+  it("明確無卡頁面保留存款並略過歷史帳單", async () => {
+    const browserPage = page({ startLoggedIn: true });
+    browserPage.frame.content
+      .mockResolvedValueOnce(depositHtml)
+      .mockResolvedValue("<p>您尚未持有本行信用卡。</p>");
+    const browserInstance = browser(browserPage);
+    puppeteerMock.launch.mockResolvedValue(browserInstance);
+    const result = await createHncbConnector({} as Fetcher).sync({
+      ...credentials,
+      sessionCookies: JSON.stringify([
+        {
+          name: "JSESSIONID",
+          value: "synthetic",
+          domain: "netbank.hncb.com.tw",
+        },
+      ]),
+    });
+    expect(result.bankAccounts).toHaveLength(1);
+    expect(result.bankBalanceSnapshots).toHaveLength(1);
+    expect(result.creditCardBills).toEqual([]);
+    expect(browserPage.frame.content).toHaveBeenCalledTimes(2);
+    expect(browserInstance.close).toHaveBeenCalledOnce();
+  });
+});
+
 function page(options?: {
   html?: string;
   startLoggedIn?: boolean;

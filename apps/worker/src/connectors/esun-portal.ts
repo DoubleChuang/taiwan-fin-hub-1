@@ -351,6 +351,11 @@ export function readEsunCardBalances(snapshot: EsunSnapshot) {
     statement?.totalAmountDue ?? billTotal?.billTotalAmount,
   );
   const unposted = numberOrUndefined(unpostedEntry?.unpostedAmount) ?? 0;
+  const isPaid = overview?.creditCardFeePaid === true ? true : undefined;
+  // 已繳正額帳單不再計入負債；負額帳單的溢繳餘額仍須保留。
+  const unpaidStatementBalance = isPaid
+    ? Math.min(statementBalance ?? 0, 0)
+    : (statementBalance ?? 0);
   return {
     statementBalance,
     minimumPayment: numberOrUndefined(
@@ -363,9 +368,9 @@ export function readEsunCardBalances(snapshot: EsunSnapshot) {
     statementClosingDate: parseFlexibleDate(
       overview?.nextStatementBillingDate ?? bill?.billDate,
     ),
-    outstanding: (statementBalance ?? 0) + unposted,
+    outstanding: unpaidStatementBalance + unposted,
     currency: statement?.currency || billTotal?.billTotalCurrency || "TWD",
-    isPaid: overview?.creditCardFeePaid === true ? true : undefined,
+    isPaid,
     billingPeriod:
       parseBillPeriod(snapshot.billPeriod) ??
       parseFlexibleDate(bill?.billDate)?.slice(0, 7),

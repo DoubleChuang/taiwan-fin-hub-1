@@ -29,6 +29,7 @@ export function parseTaishinConfig(config: unknown): TaishinConfig {
 }
 
 export type TaishinCreditCardPayloads = {
+  hasCreditCard?: boolean;
   summary: unknown;
   overview?: unknown;
   bills: unknown[];
@@ -58,6 +59,14 @@ export function parseTaishinCreditCardData(
   payloads: TaishinCreditCardPayloads,
   now = new Date(),
 ): TaishinCreditCardData {
+  if (payloads.hasCreditCard === false) {
+    return {
+      bankAccounts: [],
+      bankBalanceSnapshots: [],
+      bankTransactions: [],
+      creditCardBills: [],
+    };
+  }
   const summary = responseValue(payloads.summary);
   const summaryTwd = firstRecordValue(summary) ?? {};
   const overview = currentPaymentOverview(responseValue(payloads.overview));

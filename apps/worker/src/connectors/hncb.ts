@@ -5,7 +5,11 @@ import puppeteer, {
   type Frame,
   type Page,
 } from "@cloudflare/puppeteer";
-import { parseHncbData, type HncbConfig } from "@taiwan-fin-hub/connectors";
+import {
+  isNoCreditCardMessage,
+  parseHncbData,
+  type HncbConfig,
+} from "@taiwan-fin-hub/connectors";
 import type { SyncResult } from "@taiwan-fin-hub/core";
 
 const LOGIN_URL =
@@ -196,7 +200,12 @@ export function createHncbConnector(
             const depositOverviewHtml = await fetchDepositOverview(page);
             const unbilledHtml = await fetchCreditCardBill(page, "0");
             const billsHtml: string[] = [];
-            for (const range of CREDIT_CARD_BILL_RANGES.slice(1)) {
+            const noCreditCard = isNoCreditCardMessage(
+              unbilledHtml.replace(/<[^>]*>/g, " "),
+            );
+            for (const range of noCreditCard
+              ? []
+              : CREDIT_CARD_BILL_RANGES.slice(1)) {
               const billHtml = await fetchCreditCardBill(page, range);
               if (billHtml) billsHtml.push(billHtml);
             }

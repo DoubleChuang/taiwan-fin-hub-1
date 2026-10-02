@@ -523,4 +523,51 @@ assert.throws(
   /keys=AcctAmount,TransDate,TransDetail/,
 );
 
+const noCardResult = parseFirstbankData(
+  {
+    depositOverviewHtml,
+    transactionHistoryHtml: payloads.transactionHistoryHtml,
+    hasCreditCard: false,
+  },
+  now,
+);
+assert.ok(noCardResult.bankAccounts.length > 0);
+assert.ok(noCardResult.bankTransactions.length > 0);
+assert.equal(
+  noCardResult.bankAccounts.some((account) => account.accountType === "credit"),
+  false,
+);
+assert.deepEqual(noCardResult.creditCardBills, []);
+assert.deepEqual(
+  parseFirstbankData({
+    cardBill: {
+      HEAD: {
+        MSGID: "CMSQRY0014",
+        RETURNCODE: "SYNTHETIC_NO_CARD",
+        RETURNDESC: "您尚未持有本行信用卡。",
+      },
+    },
+  }),
+  {
+    bankAccounts: [],
+    bankBalanceSnapshots: [],
+    bankTransactions: [],
+    creditCardBills: [],
+  },
+);
+assert.throws(
+  () =>
+    parseFirstbankData({
+      cardBill: {
+        HEAD: {
+          MSGID: "CMSQRY0014",
+          RETURNCODE: "0001",
+          RETURNDESC: "未申請網服會員",
+        },
+        CONTENT: {},
+      },
+    }),
+  FirstbankProtocolError,
+);
+
 console.log("First Bank Web connector self-check passed.");
