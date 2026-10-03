@@ -33,3 +33,4 @@ docs/*
 .vscode/
 
 **/.svelte-check/
+.superpowers/
