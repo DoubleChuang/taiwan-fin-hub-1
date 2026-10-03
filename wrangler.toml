@@ -1,4 +1,4 @@
-name = "taiwan-fin-hub-1"
+name = "all-set-tw"
 main = "apps/worker/src/index.ts"
 compatibility_date = "2026-06-01"
 compatibility_flags = ["nodejs_compat"]
@@ -28,17 +28,7 @@ binding = "DB"
 database_name = "taiwan-fin-hub"
 # database_id is intentionally omitted from this public configuration.
 # Cloudflare automatically provisions or resolves the D1 binding on deploy.
-migrations_dir = "packages/db/migrations"
-
-[previews.browser]
-binding = "BROWSER"
-
-[previews.ai]
-binding = "AI"
-
-[[previews.queues.producers]]
-binding = "SYNC_QUEUE"
-queue = "taiwan-fin-hub-sync"
+migrations_dir = "apps/worker/migrations"
 
 [observability]
 enabled = true

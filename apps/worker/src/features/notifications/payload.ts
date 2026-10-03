@@ -2,7 +2,7 @@ import type {
   ConnectorId,
   NotificationPreferences,
   SyncNotificationStatus,
-} from "@taiwan-fin-hub/core";
+} from "@taiwan-fin-hub/shared";
 
 export type SyncNotificationEvent = {
   connectorId: ConnectorId;

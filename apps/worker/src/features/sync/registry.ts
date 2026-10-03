@@ -1,47 +1,58 @@
-import { connectorCatalog, type ConnectorId } from "@taiwan-fin-hub/core";
-import type { SyncTrigger } from "@taiwan-fin-hub/db";
+import { connectorCatalog, type ConnectorId } from "@taiwan-fin-hub/shared";
+import type { SyncTrigger } from "../../db";
 import type { Env } from "../../platform/env";
 import {
   prepareSinopacCaptchaSession,
-  prepareHncbCaptchaSession,
-  prepareKgibankCaptchaSession,
-  prepareRakutenCaptchaSession,
-  prepareTaishinCaptchaSession,
-  prepareObankCaptchaSession,
-  prepareFirstbankCaptchaSession,
-  prepareMegabankCaptchaSession,
-  syncCathaybk,
-  syncCtbc,
-  syncSkbank,
-  syncEsun,
   syncSinopac,
+  type SinopacSyncOverrides,
+} from "../../sources/sinopac/sync";
+import {
+  prepareHncbCaptchaSession,
+  syncHncb,
+  type HncbSyncOverrides,
+} from "../../sources/hncb/sync";
+import {
+  prepareKgibankCaptchaSession,
+  syncKgibank,
+  type KgibankSyncOverrides,
+} from "../../sources/kgibank/sync";
+import {
+  prepareRakutenCaptchaSession,
+  syncRakuten,
+  type RakutenSyncOverrides,
+} from "../../sources/rakuten/sync";
+import {
+  prepareTaishinCaptchaSession,
+  syncTaishin,
+  type TaishinSyncOverrides,
+} from "../../sources/taishin/sync";
+import {
+  prepareObankCaptchaSession,
   syncObank,
+  type ObankSyncOverrides,
+} from "../../sources/obank/sync";
+import {
+  prepareFirstbankCaptchaSession,
+  syncFirstbank,
+  type FirstbankSyncOverrides,
+} from "../../sources/firstbank/sync";
+import {
+  prepareMegabankCaptchaSession,
+  syncMegabank,
+  type MegabankSyncOverrides,
+} from "../../sources/megabank/sync";
+import {
+  syncCathaybk,
+  type CathaySyncOverrides,
+} from "../../sources/cathaybk/sync";
+import { syncCtbc } from "../../sources/ctbc/sync";
+import { syncSkbank } from "../../sources/skbank/sync";
+import { syncEsun } from "../../sources/esun/sync";
+import {
   syncNextbank,
   prepareNextbankCaptchaSession,
-  syncFirstbank,
-  syncHncb,
-  syncKgibank,
-  syncRakuten,
-  syncTaishin,
-  syncTdcc,
-  syncMegabank,
-  SYNC_SCOPE_ALL,
-  TDCC_SCOPE_BANK,
-  TDCC_SCOPE_INVESTMENTS,
-  TDCC_SCOPE_TRADES,
-  type SinopacSyncOverrides,
-  type ObankSyncOverrides,
-  type FirstbankSyncOverrides,
-  type SyncOutcome,
-  type SyncScope,
-  type HncbSyncOverrides,
-  type KgibankSyncOverrides,
-  type RakutenSyncOverrides,
-  type TaishinSyncOverrides,
-  type TdccSyncOverrides,
-  type CathaySyncOverrides,
-  type MegabankSyncOverrides,
-} from "./service";
+} from "../../sources/nextbank/sync";
+import { SYNC_SCOPE_ALL, type SyncOutcome, type SyncScope } from "./types";
 
 type ConnectorRuntimeDefinition = {
   run: (
@@ -65,13 +76,11 @@ export const connectorRuntimeRegistry: Record<
     },
   },
   tdcc: {
-    run: (env, trigger, scope, overrides) =>
-      syncTdcc(
-        env,
-        trigger,
-        overrides as TdccSyncOverrides,
-        scope === SYNC_SCOPE_ALL ? tdccAllScopes() : [scope],
-      ),
+    run: async () => {
+      throw new Error(
+        "TDCC sync must be started through its durable Queue flow.",
+      );
+    },
   },
   esun: {
     run: (env, trigger) => syncEsun(env, trigger),
@@ -161,8 +170,4 @@ export function prepareConnectorChallenge(env: Env, connectorId: ConnectorId) {
     );
   }
   return prepare(env);
-}
-
-function tdccAllScopes(): SyncScope[] {
-  return [TDCC_SCOPE_INVESTMENTS, TDCC_SCOPE_BANK, TDCC_SCOPE_TRADES];
 }
