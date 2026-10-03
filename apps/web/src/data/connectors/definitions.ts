@@ -1,7 +1,7 @@
 import {
   connectorCatalog,
   type ConnectorFormFieldKey,
-} from "@taiwan-fin-hub/core";
+} from "@taiwan-fin-hub/shared";
 import type { ConnectorField, ConnectorId } from "./types";
 
 export interface ConnectorDefinition {

@@ -1,6 +1,6 @@
-import type { ConnectorId, QueuedSyncResponse } from "@taiwan-fin-hub/core";
+import type { ConnectorId, QueuedSyncResponse } from "@taiwan-fin-hub/shared";
 
-export type { ConnectorId, QueuedSyncResponse } from "@taiwan-fin-hub/core";
+export type { ConnectorId, QueuedSyncResponse } from "@taiwan-fin-hub/shared";
 
 export type SyncTarget = "default" | "investments" | "bank" | "trades";
 
