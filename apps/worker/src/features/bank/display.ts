@@ -1,4 +1,4 @@
-import type { ConnectorId } from "@taiwan-fin-hub/core";
+import type { ConnectorId } from "@taiwan-fin-hub/shared";
 
 const ESUN_BANK_CODE = "808";
 const CATHAYBK_BANK_CODE = "013";
