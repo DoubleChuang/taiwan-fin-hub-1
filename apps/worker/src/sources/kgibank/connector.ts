@@ -1,5 +1,11 @@
 import type { SyncResult } from "../types";
-import { BrowserRunCapacityError, launchBrowserWithRetry } from "../browser.js";
+import {
+  BrowserRunCapacityError,
+  launchBrowserWithRetry,
+  connectBrowserWithCancellation,
+  prepareBrowserLoginWithRetry,
+  closeBrowserSession,
+} from "../browser.js";
 import puppeteer, {
   type Browser,
   type Frame,
@@ -148,17 +154,51 @@ export function createKgibankConnector(
         );
       }
 
-      const browserInstance = await acquireBrowser(
-        browserFetcher,
-        hasManualCaptcha ? config.browserSessionId : undefined,
-      );
+      let browserInstance: Browser | undefined;
       let appFrame: Frame | undefined;
       let authHeaders: Record<string, string> | undefined;
       try {
-        const pages = await browserInstance.pages();
-        const page = pages[0] ?? (await browserInstance.newPage());
-        await configurePage(page);
-        const headerWatch = watchAuthHeaders(page);
+        let page: Page;
+        let headerWatch: ReturnType<typeof watchAuthHeaders>;
+        let initialCapture:
+          Awaited<ReturnType<typeof openLoginAndCaptureCaptcha>> | undefined;
+        if (hasManualCaptcha) {
+          browserInstance = await acquireBrowser(
+            browserFetcher,
+            config.browserSessionId,
+          );
+          const pages = await browserInstance.pages();
+          page = pages[0] ?? (await browserInstance.newPage());
+          await configurePage(page);
+          headerWatch = watchAuthHeaders(page);
+        } else {
+          const prepared = await prepareBrowserLoginWithRetry({
+            binding: browserFetcher,
+            connectorId: "kgibank",
+            isRetryable: (error) =>
+              error instanceof KgibankActionTimeoutError ||
+              (error instanceof KgibankConnectionError &&
+                /^凱基登入頁沒有在期限內/.test(error.message)),
+            prepare: async (browser, observePage) => {
+              const pages = await browser.pages();
+              const page = pages[0] ?? (await browser.newPage());
+              observePage(page);
+              await configurePage(page);
+              const headerWatch = watchAuthHeaders(page);
+              try {
+                const capture = await openLoginAndCaptureCaptcha(page, config);
+                return { page, headerWatch, capture };
+              } catch (error) {
+                headerWatch.dispose();
+                throw error;
+              }
+            },
+          });
+          browserInstance = prepared.browser;
+          page = prepared.value.page;
+          headerWatch = prepared.value.headerWatch;
+          initialCapture = prepared.value.capture;
+        }
         try {
           if (hasManualCaptcha) {
             const loginFrame = await findLoginFrame(page);
@@ -173,7 +213,7 @@ export function createKgibankConnector(
             });
             assertSuccessfulLogin(outcome);
           } else {
-            await loginWithOcr(page, config, recognizeCaptcha!);
+            await loginWithOcr(page, config, recognizeCaptcha!, initialCapture);
           }
           authHeaders = await waitForAuthHeaders(headerWatch);
         } finally {
@@ -236,7 +276,8 @@ export function createKgibankConnector(
             allowFailure: true,
           }).catch(() => undefined);
         }
-        await closeKgibankBrowser(browserInstance);
+        if (browserInstance)
+          await closeKgibankBrowser(browserInstance, browserFetcher);
       }
     },
   };
@@ -282,7 +323,7 @@ export async function prepareKgibankCaptcha(
   } catch (error) {
     throw mapKgibankError(error);
   } finally {
-    if (!preserved) await closeKgibankBrowser(browserInstance);
+    if (!preserved) await closeKgibankBrowser(browserInstance, browserFetcher);
   }
 }
 
@@ -294,10 +335,14 @@ async function loginWithOcr(
     contentType: string,
     digitCount: number,
   ) => Promise<string>,
+  initialCapture?: Awaited<ReturnType<typeof openLoginAndCaptureCaptcha>>,
 ) {
   for (let attempt = 1; attempt <= KGIBANK_AUTO_LOGIN_ATTEMPTS; attempt += 1) {
     try {
-      const { frame, captcha } = await openLoginAndCaptureCaptcha(page, config);
+      const { frame, captcha } =
+        attempt === 1 && initialCapture
+          ? initialCapture
+          : await openLoginAndCaptureCaptcha(page, config);
       logKgibankEvent("kgibank_login_stage", {
         attempt,
         stage: "captcha_captured",
@@ -827,7 +872,10 @@ async function acquireBrowser(
       );
     }
     try {
-      return await puppeteer.connect(browserFetcher, preferred.sessionId);
+      return await connectBrowserWithCancellation(
+        browserFetcher,
+        preferred.sessionId,
+      );
     } catch {
       throw new KgibankBrowserCapacityError(
         "前一個凱基驗證工作階段尚未釋放，請稍候再試。",
@@ -857,13 +905,9 @@ async function configurePage(page: Page) {
   page.setDefaultNavigationTimeout(NAVIGATION_TIMEOUT_MS);
 }
 
-async function closeKgibankBrowser(browser: Browser) {
-  try {
-    await browser.close();
-  } catch (error) {
-    logKgibankEvent("kgibank_browser_cleanup_failed", {
-      errorName: error instanceof Error ? error.name : typeof error,
-    });
+async function closeKgibankBrowser(browser: Browser, binding: Fetcher) {
+  if (!(await closeBrowserSession(binding, browser))) {
+    logKgibankEvent("kgibank_browser_cleanup_failed", {});
   }
 }
 
