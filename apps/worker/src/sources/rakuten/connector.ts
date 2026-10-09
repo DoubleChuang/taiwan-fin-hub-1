@@ -8,7 +8,14 @@ import type { SyncResult } from "../types";
  * - 不復用 session／cookie：每次同步都重新登入，結束一律 browser.close()；
  *   只有 prepare 階段 disconnect，保留瀏覽器給使用者輸入驗證碼。
  */
-import { BrowserRunCapacityError, launchBrowserWithRetry } from "../browser.js";
+import {
+  BrowserRunCapacityError,
+  launchBrowserWithRetry,
+  connectBrowserWithCancellation,
+  prepareBrowserLoginWithRetry,
+  closeBrowserSession,
+  type ReportBrowserLoginStage,
+} from "../browser.js";
 import puppeteer, {
   type Browser,
   type Dialog,
@@ -295,12 +302,44 @@ export function createRakutenConnector(
         timedStageStartedAt = now;
       };
 
+      const capturedUrls: string[] = [];
+      const onGlobalResponse = (response: HTTPResponse) => {
+        const url = response.url();
+        if (!url.includes("rakuten-bank.com.tw")) return;
+        const path = pathOfUrl(url);
+        if (/\.(js|css|png|jpe?g|svg|ico|woff2?|ttf)$/i.test(path)) return;
+        capturedUrls.push(
+          `${response.request().method()} ${path} (${response.status()})`,
+        );
+      };
+      const initializePage = async (
+        browser: Browser,
+        observePage?: (page: Page) => void,
+        reportStage?: ReportBrowserLoginStage,
+      ) => {
+        stage = "initialize_browser_page";
+        const pages = await browser.pages();
+        const page = pages[0] ?? (await browser.newPage());
+        observePage?.(page);
+        stage = "configure_browser_page";
+        reportStage?.("configure_page");
+        await configurePage(page);
+        // Response bodies remain encrypted here; financial data comes from
+        // the response tap installed by configurePage before navigation.
+        capturedUrls.length = 0;
+        page.on("response", onGlobalResponse);
+        return page;
+      };
+      let initialCapture:
+        Awaited<ReturnType<typeof prepareLoginAndCapture>> | undefined;
+
       try {
         if (useManualCaptcha) {
           browserInstance = await reconnectPreparedBrowser(
             browserFetcher,
             config.browserSessionId!,
           );
+          page = await initializePage(browserInstance);
         } else {
           // 釋放先前人工流程留下、已不會再用到的瀏覽器，避免佔用名額
           if (config.browserSessionId) {
@@ -309,29 +348,42 @@ export function createRakutenConnector(
               config.browserSessionId,
             );
           }
-          browserInstance = await acquireBrowser(browserFetcher);
+          const prepared = await prepareBrowserLoginWithRetry({
+            binding: browserFetcher,
+            connectorId: "rakuten",
+            remainingMs: () =>
+              remainingMs(syncStartedAt, "login") - MIN_OCR_ATTEMPT_MS,
+            isRetryable: (error) =>
+              error instanceof RakutenActionTimeoutError ||
+              (error instanceof RakutenConnectionError &&
+                /^樂天登入頁沒有/.test(error.message)),
+            prepare: async (
+              browser,
+              observePage,
+              _signal,
+              _attempt,
+              reportStage,
+            ) => {
+              const page = await initializePage(
+                browser,
+                observePage,
+                reportStage,
+              );
+              stage = "login";
+              switchTimedStage("loginMs");
+              const capture = await prepareLoginAndCapture(
+                page,
+                config,
+                (ms) => Math.min(ms, remainingMs(syncStartedAt, "login")),
+                reportStage,
+              );
+              return { page, capture };
+            },
+          });
+          browserInstance = prepared.browser;
+          page = prepared.value.page;
+          initialCapture = prepared.value.capture;
         }
-
-        stage = "initialize_browser_page";
-        const pages = await browserInstance.pages();
-        page = pages[0] ?? (await browserInstance.newPage());
-
-        stage = "configure_browser_page";
-        await configurePage(page);
-
-        // 網路層只看得到加密的 rsData，監聽器只用來記錄呼叫過的路徑（空結果診斷）；
-        // 資料一律讀取頁面內攔截到的解密後回應（見 installRakutenResponseTap）。
-        const capturedUrls: string[] = [];
-        const onGlobalResponse = (response: HTTPResponse) => {
-          const url = response.url();
-          if (!url.includes("rakuten-bank.com.tw")) return;
-          const path = pathOfUrl(url);
-          if (/\.(js|css|png|jpe?g|svg|ico|woff2?|ttf)$/i.test(path)) return;
-          capturedUrls.push(
-            `${response.request().method()} ${path} (${response.status()})`,
-          );
-        };
-        page.on("response", onGlobalResponse);
 
         let loggedIn = false;
         try {
@@ -353,6 +405,7 @@ export function createRakutenConnector(
               onAttemptStarted: () => {
                 summary.ocrAttempts += 1;
               },
+              initialCapture,
             });
           }
 
@@ -494,7 +547,8 @@ export function createRakutenConnector(
         outcome = normalized.name;
         throw normalized;
       } finally {
-        if (browserInstance) await closeRakutenBrowser(browserInstance);
+        if (browserInstance)
+          await closeRakutenBrowser(browserInstance, browserFetcher);
         // 整次同步一筆摘要（資訊類，不含帳號、餘額等值）。此處已在登出與關閉瀏覽器
         // 之後，所以 logoutMs 一定已寫入 summary
         console.log(
@@ -1099,7 +1153,7 @@ export async function prepareRakutenCaptcha(
       captchaImage,
     };
   } finally {
-    if (!preserved) await closeRakutenBrowser(browserInstance);
+    if (!preserved) await closeRakutenBrowser(browserInstance, browserFetcher);
   }
 }
 
@@ -1111,11 +1165,14 @@ async function prepareLoginAndCapture(
   page: Page,
   config: RakutenConfig,
   budget: TimeBudget = noBudget,
+  reportStage?: ReportBrowserLoginStage,
 ): Promise<{
   captchaDataUri: string;
   fillCredentials: () => Promise<void>;
 }> {
+  reportStage?.("navigate");
   await gotoAllowingTimeout(page, LOGIN_URL, budget(GOTO_ALLOW_TIMEOUT_MS));
+  reportStage?.("form");
   try {
     await page.waitForFunction(
       () =>
@@ -1140,6 +1197,7 @@ async function prepareLoginAndCapture(
     );
   }
 
+  reportStage?.("captcha");
   const captchaDataUri = await captureCaptchaImage(
     page,
     budget(CAPTCHA_IMAGE_TIMEOUT_MS),
@@ -1346,7 +1404,10 @@ async function loginWithOcr(
   config: RakutenConfig,
   recognizeCaptcha: RakutenCaptchaRecognizer,
   syncStartedAt: number,
-  hooks: { onAttemptStarted?: () => void } = {},
+  hooks: {
+    onAttemptStarted?: () => void;
+    initialCapture?: Awaited<ReturnType<typeof prepareLoginAndCapture>>;
+  } = {},
 ): Promise<void> {
   const budget: TimeBudget = (preferredMs) =>
     Math.min(preferredMs, remainingMs(syncStartedAt, "login"));
@@ -1354,11 +1415,10 @@ async function loginWithOcr(
   await runRakutenOcrAttempts(
     async () => {
       hooks.onAttemptStarted?.();
-      const { captchaDataUri, fillCredentials } = await prepareLoginAndCapture(
-        page,
-        config,
-        budget,
-      );
+      const capture = hooks.initialCapture;
+      hooks.initialCapture = undefined;
+      const { captchaDataUri, fillCredentials } =
+        capture ?? (await prepareLoginAndCapture(page, config, budget));
 
       // 帳密填寫與辨識平行進行；用 allSettled 確保兩者都結束後才往下走，
       // 避免辨識失敗時背景仍在打字、與下一輪的頁面重新載入互相干擾。
@@ -1690,7 +1750,7 @@ async function reconnectPreparedBrowser(
     );
   }
   try {
-    return await puppeteer.connect(browserFetcher, sessionId);
+    return await connectBrowserWithCancellation(browserFetcher, sessionId);
   } catch {
     throw new RakutenBrowserCapacityError(
       "前一個樂天驗證工作階段尚未釋放，請稍候再試。",
@@ -1716,7 +1776,10 @@ async function acquireBrowserForPrepare(
     }
     if (preferred) {
       try {
-        return await puppeteer.connect(browserFetcher, preferred.sessionId);
+        return await connectBrowserWithCancellation(
+          browserFetcher,
+          preferred.sessionId,
+        );
       } catch {
         throw new RakutenBrowserCapacityError(
           "前一個樂天驗證工作階段尚未釋放，請稍候再試。",
@@ -1740,8 +1803,11 @@ async function releasePreparedBrowser(
         const sessions = await puppeteer.sessions(browserFetcher);
         const session = sessions.find((item) => item.sessionId === sessionId);
         if (!session || session.connectionId) return;
-        const browser = await puppeteer.connect(browserFetcher, sessionId);
-        await closeRakutenBrowser(browser);
+        const browser = await connectBrowserWithCancellation(
+          browserFetcher,
+          sessionId,
+        );
+        await closeRakutenBrowser(browser, browserFetcher);
       })(),
       STALE_SESSION_RELEASE_TIMEOUT_MS,
       () => new RakutenActionTimeoutError(),
@@ -1772,14 +1838,11 @@ async function acquireBrowser(browserFetcher: Fetcher): Promise<Browser> {
   });
 }
 
-async function closeRakutenBrowser(browser: Browser) {
-  try {
-    await browser.close();
-  } catch (error) {
+async function closeRakutenBrowser(browser: Browser, binding: Fetcher) {
+  if (!(await closeBrowserSession(binding, browser))) {
     console.warn(
       JSON.stringify({
         event: "rakuten_browser_close_failed",
-        errorName: error instanceof Error ? error.name : "UnknownError",
       }),
     );
   }
