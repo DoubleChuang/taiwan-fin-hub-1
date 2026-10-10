@@ -1,3 +1,5 @@
+import { createSyncExecution } from "../../features/sync/execution";
+import { prepareCardAuthorizationWrite } from "../../features/sync/card-authorization-write";
 import type { Env } from "../../platform/env";
 import { canonicalSyncLockRowId } from "../../features/sync/lock";
 import {
@@ -18,6 +20,7 @@ import {
 import { decryptJson, encryptJson } from "../../platform/crypto";
 import { configEncryptionKey } from "../../platform/config";
 import { parseMegabankConfig } from "./protocol";
+import { reconcileMegabankDeposits } from "./transaction-reconcile";
 import {
   parsePublicConnectorConfig,
   splitConnectorCursorState,
@@ -69,44 +72,52 @@ export async function prepareMegabankCaptchaSession(env: Env) {
   });
   if (!locked) throw new SyncAlreadyRunningError(connectorId);
 
+  const execution = createSyncExecution(
+    env,
+    { lockRowId, runId },
+    { deadline: Date.now() + 3 * 60 * 1000 },
+  );
   try {
-    const settings = await requireConnectorSettings(env.DB, connectorId);
-    const stored = await decryptJson<Record<string, unknown>>(
-      settings.encrypted_config,
-      configEncryptionKey(env),
-    );
-    const config = parseMegabankConfig({
-      ...stored,
-      ...parsePublicConnectorConfig(connectorId, settings.public_config),
-    });
-    const prepared = await prepareMegabankCaptcha(config);
-    const saved = await updateConnectorEncryptedConfigIfCurrent(
-      env.DB,
-      connectorId,
-      settings.encrypted_config,
-      await encryptJson(
-        {
-          ...stored,
-          // 首次取得驗證碼時固定虛擬裝置，之後登入都沿用，簡訊驗證才可能只需一次。
-          ...prepared.device,
-          pendingSession: prepared.pendingSession,
-          pendingSessionExpiresAt: prepared.pendingSessionExpiresAt,
-        },
+    return await execution.run(async (env) => {
+      const settings = await requireConnectorSettings(env.DB, connectorId);
+      const stored = await decryptJson<Record<string, unknown>>(
+        settings.encrypted_config,
         configEncryptionKey(env),
-      ),
-    );
-    if (!saved) {
-      throw new NeedsUserActionError(
-        "兆豐銀行設定在驗證期間已變更，請重新取得驗證碼。",
       );
-    }
-    return {
-      captchaImage: prepared.captchaImage,
-      expiresAt: prepared.pendingSessionExpiresAt,
-      captchaLength: 5,
-      captchaKind: "numeric" as const,
-    };
+      const config = parseMegabankConfig({
+        ...stored,
+        ...parsePublicConnectorConfig(connectorId, settings.public_config),
+      });
+      const prepared = await prepareMegabankCaptcha(config);
+      const saved = await updateConnectorEncryptedConfigIfCurrent(
+        env.DB,
+        connectorId,
+        settings.encrypted_config,
+        await encryptJson(
+          {
+            ...stored,
+            // 首次取得驗證碼時固定虛擬裝置，之後登入都沿用，但不保證免簡訊。
+            ...prepared.device,
+            pendingSession: prepared.pendingSession,
+            pendingSessionExpiresAt: prepared.pendingSessionExpiresAt,
+          },
+          configEncryptionKey(env),
+        ),
+      );
+      if (!saved) {
+        throw new NeedsUserActionError(
+          "兆豐銀行設定在驗證期間已變更，請重新取得驗證碼。",
+        );
+      }
+      return {
+        captchaImage: prepared.captchaImage,
+        expiresAt: prepared.pendingSessionExpiresAt,
+        captchaLength: 5,
+        captchaKind: "numeric" as const,
+      };
+    });
   } finally {
+    execution.stop();
     await releaseSyncJobLock(env.DB, lockRowId, runId);
   }
 }
@@ -196,7 +207,11 @@ export async function syncMegabank(
 
   const bankAccounts = result.bankAccounts ?? [];
   const bankBalanceSnapshots = result.bankBalanceSnapshots ?? [];
-  const bankTransactions = result.bankTransactions ?? [];
+  // 舊 sourceId 含會隨當天交易變動的順序欄位；寫入前先對回既有列，避免重複寫入。
+  const bankTransactions = await reconcileMegabankDeposits(
+    env.DB,
+    result.bankTransactions ?? [],
+  );
   const creditCardBills = result.creditCardBills ?? [];
   const now = new Date().toISOString();
   const records: SyncWriteRecord[] = [
@@ -251,13 +266,34 @@ export async function syncMegabank(
       ),
     );
   }
-  const newRecords = await persistStagedSyncWrite(env.DB, {
+  const prepared = await prepareCardAuthorizationWrite(
+    env.DB,
+    connectorId,
     records,
+    {
+      sourcePattern: "megabank:card:tx:%",
+      encryptedConfig: settings.encrypted_config,
+      cardId: (row) => {
+        if (!row.source_id.startsWith("megabank:card:tx:")) return undefined;
+        const metadata = JSON.parse(row.raw_payload || "{}") as {
+          cardLast4?: string;
+        };
+        return typeof metadata.cardLast4 === "string" &&
+          /^\d{4}$/.test(metadata.cardLast4)
+          ? metadata.cardLast4
+          : undefined;
+      },
+    },
+  );
+  const newRecords = await persistStagedSyncWrite(env.DB, {
+    records: prepared.records,
     settingsGuard,
-    afterPromoteStatements:
-      bankAccounts.length > 0
+    afterPromoteStatements: [
+      ...prepared.afterPromoteStatements,
+      ...(bankAccounts.length > 0
         ? [linkCanonicalBankAccountsStatement(env.DB, settingsGuard)]
-        : [],
+        : []),
+    ],
     finalizeStatements,
   });
   if (
